@@ -1,0 +1,413 @@
+#include <iostream>
+#include <memory>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/features2d/features2d.hpp>
+#include <opencv2/nonfree/features2d.hpp>
+
+#include <boost/format.hpp>
+#include <boost/shared_array.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <boost/filesystem.hpp>
+
+
+using namespace cv;
+using namespace std;
+using boost::format;
+using boost::io::group;
+
+typedef pair<Mat,Mat> image_pair;
+
+class image_pair_generator {
+public:
+    typedef boost::optional<image_pair> result_type;
+    typedef pair<string, string> string_pair;
+    image_pair_generator(const string_pair &mask,int index_begin=0)
+	: m_mask(mask), m_index(index_begin) {}
+    result_type operator()() {
+	string name0 = str(boost::format(m_mask.first) % m_index),
+	    name1 = str(boost::format(m_mask.second) % m_index);
+	image_pair pair = make_pair(imread_gray(name0), imread_gray(name1));
+	return pair.first.data && pair.second.data ? result_type(pair) : result_type();
+    }
+private:
+    // for some reason, this is said to produce a better results than directly reading with imread
+    // http://stackoverflow.com/questions/7461075/opencv-image-conversion-from-rgb-to-grayscale-using-imread-giving-poor-results
+    Mat imread_gray(const string &file) const {
+	Mat image = imread(file), image_gray;
+	cvtColor(image, image_gray, CV_BGR2GRAY);
+	return image;
+    }
+    int m_index;
+    string_pair m_mask;
+};
+static void findConstrainedCorrespondences(const Mat& _F,
+                const vector<KeyPoint>& keypoints1,
+                const vector<KeyPoint>& keypoints2,
+                const Mat& descriptors1,
+                const Mat& descriptors2,
+                vector<Vec2i>& matches,
+                double eps, double ratio)
+{
+    float F[9]={0};
+    int dsize = descriptors1.cols;
+
+    Mat Fhdr = Mat(3, 3, CV_32F, F);
+    _F.convertTo(Fhdr, CV_32F);
+    matches.clear();
+
+    for( int i = 0; i < (int)keypoints1.size(); i++ )
+    {
+        Point2f p1 = keypoints1[i].pt;
+        double bestDist1 = DBL_MAX, bestDist2 = DBL_MAX;
+        int bestIdx1 = -1;//, bestIdx2 = -1;
+        const float* d1 = descriptors1.ptr<float>(i);
+
+        for( int j = 0; j < (int)keypoints2.size(); j++ )
+        {
+            Point2f p2 = keypoints2[j].pt;
+            double e = p2.x*(F[0]*p1.x + F[1]*p1.y + F[2]) +
+                       p2.y*(F[3]*p1.x + F[4]*p1.y + F[5]) +
+                       F[6]*p1.x + F[7]*p1.y + F[8];
+            if( fabs(e) > eps )
+                continue;
+            const float* d2 = descriptors2.ptr<float>(j);
+            double dist = 0;
+            int k = 0;
+
+            for( ; k <= dsize - 8; k += 8 )
+            {
+                float t0 = d1[k] - d2[k], t1 = d1[k+1] - d2[k+1];
+                float t2 = d1[k+2] - d2[k+2], t3 = d1[k+3] - d2[k+3];
+                float t4 = d1[k+4] - d2[k+4], t5 = d1[k+5] - d2[k+5];
+                float t6 = d1[k+6] - d2[k+6], t7 = d1[k+7] - d2[k+7];
+                dist += t0*t0 + t1*t1 + t2*t2 + t3*t3 +
+                        t4*t4 + t5*t5 + t6*t6 + t7*t7;
+
+                if( dist >= bestDist2 )
+                    break;
+            }
+
+            if( dist < bestDist2 )
+            {
+                for( ; k < dsize; k++ )
+                {
+                    float t = d1[k] - d2[k];
+                    dist += t*t;
+                }
+
+                if( dist < bestDist1 )
+                {
+                    bestDist2 = bestDist1;
+                    //bestIdx2 = bestIdx1;
+                    bestDist1 = dist;
+                    bestIdx1 = (int)j;
+                }
+                else if( dist < bestDist2 )
+                {
+                    bestDist2 = dist;
+                    //bestIdx2 = (int)j;
+                }
+            }
+        }
+
+        if( bestIdx1 >= 0 && bestDist1 < bestDist2*ratio )
+        {
+            Point2f p2 = keypoints1[bestIdx1].pt;
+            double e = p2.x*(F[0]*p1.x + F[1]*p1.y + F[2]) +
+                        p2.y*(F[3]*p1.x + F[4]*p1.y + F[5]) +
+                        F[6]*p1.x + F[7]*p1.y + F[8];
+            if( e > eps*0.25 )
+                continue;
+            double threshold = bestDist1/ratio;
+            const float* d22 = descriptors2.ptr<float>(bestIdx1);
+            int i1 = 0;
+            for( ; i1 < (int)keypoints1.size(); i1++ )
+            {
+                if( i1 == i )
+                    continue;
+                Point2f pt1 = keypoints1[i1].pt;
+                const float* d11 = descriptors1.ptr<float>(i1);
+                double dist = 0;
+
+                e = p2.x*(F[0]*pt1.x + F[1]*pt1.y + F[2]) +
+                    p2.y*(F[3]*pt1.x + F[4]*pt1.y + F[5]) +
+                    F[6]*pt1.x + F[7]*pt1.y + F[8];
+                if( fabs(e) > eps )
+                    continue;
+
+                for( int k = 0; k < dsize; k++ )
+                {
+                    float t = d11[k] - d22[k];
+                    dist += t*t;
+                    if( dist >= threshold )
+                        break;
+                }
+
+                if( dist < threshold )
+                    break;
+            }
+            if( i1 == (int)keypoints1.size() )
+                matches.push_back(Vec2i(i,bestIdx1));
+        }
+    }
+}
+
+
+static Point3f findRayIntersection(Point3f k1, Point3f b1, Point3f k2, Point3f b2)
+{
+    float a[4], b[2], x[2];
+    a[0] = k1.dot(k1);
+    a[1] = a[2] = -k1.dot(k2);
+    a[3] = k2.dot(k2);
+    b[0] = k1.dot(b2 - b1);
+    b[1] = k2.dot(b1 - b2);
+    Mat_<float> A(2, 2, a), B(2, 1, b), X(2, 1, x);
+    solve(A, B, X);
+
+    float s1 = X.at<float>(0, 0);
+    float s2 = X.at<float>(1, 0);
+    return (k1*s1 + b1 + k2*s2 + b2)*0.5f;
+}
+
+
+static Point3f triangulatePoint(const vector<Point2f>& ps,
+                                const vector<Mat>& Rs,
+                                const vector<Mat>& ts,
+                                const Mat& cameraMatrix)
+{
+    Mat_<double> K(cameraMatrix);
+
+    /*if( ps.size() > 2 )
+    {
+        Mat_<double> L(ps.size()*3, 4), U, evalues;
+        Mat_<double> P(3,4), Rt(3,4), Rt_part1=Rt.colRange(0,3), Rt_part2=Rt.colRange(3,4);
+
+        for( size_t i = 0; i < ps.size(); i++ )
+        {
+            double x = ps[i].x, y = ps[i].y;
+            Rs[i].convertTo(Rt_part1, Rt_part1.type());
+            ts[i].convertTo(Rt_part2, Rt_part2.type());
+            P = K*Rt;
+
+            for( int k = 0; k < 4; k++ )
+            {
+                L(i*3, k) = x*P(2,k) - P(0,k);
+                L(i*3+1, k) = y*P(2,k) - P(1,k);
+                L(i*3+2, k) = x*P(1,k) - y*P(0,k);
+            }
+        }
+
+        eigen(L.t()*L, evalues, U);
+        CV_Assert(evalues(0,0) >= evalues(3,0));
+
+        double W = fabs(U(3,3)) > FLT_EPSILON ? 1./U(3,3) : 0;
+        return Point3f((float)(U(3,0)*W), (float)(U(3,1)*W), (float)(U(3,2)*W));
+    }
+    else*/
+    {
+        Mat_<float> iK = K.inv();
+        Mat_<float> R1t = Mat_<float>(Rs[0]).t();
+        Mat_<float> R2t = Mat_<float>(Rs[1]).t();
+        Mat_<float> m1 = (Mat_<float>(3,1) << ps[0].x, ps[0].y, 1);
+        Mat_<float> m2 = (Mat_<float>(3,1) << ps[1].x, ps[1].y, 1);
+        Mat_<float> K1 = R1t*(iK*m1), K2 = R2t*(iK*m2);
+        Mat_<float> B1 = -R1t*Mat_<float>(ts[0]);
+        Mat_<float> B2 = -R2t*Mat_<float>(ts[1]);
+        return findRayIntersection(*K1.ptr<Point3f>(), *B1.ptr<Point3f>(),
+                                   *K2.ptr<Point3f>(), *B2.ptr<Point3f>());
+    }
+}
+
+
+static void triangulatePoint_test(void)
+{
+    int i, n = 100;
+    vector<Point3f> objpt(n), delta1(n), delta2(n);
+    Mat rvec1(3,1,CV_32F), tvec1(3,1,CV_64F);
+    Mat rvec2(3,1,CV_32F), tvec2(3,1,CV_64F);
+    Mat objptmat(objpt), deltamat1(delta1), deltamat2(delta2);
+    randu(rvec1, Scalar::all(-10), Scalar::all(10));
+    randu(tvec1, Scalar::all(-10), Scalar::all(10));
+    randu(rvec2, Scalar::all(-10), Scalar::all(10));
+    randu(tvec2, Scalar::all(-10), Scalar::all(10));
+
+    randu(objptmat, Scalar::all(-10), Scalar::all(10));
+    double eps = 1e-2;
+    randu(deltamat1, Scalar::all(-eps), Scalar::all(eps));
+    randu(deltamat2, Scalar::all(-eps), Scalar::all(eps));
+    vector<Point2f> imgpt1, imgpt2;
+    Mat_<float> cameraMatrix(3,3);
+    double fx = 1000., fy = 1010., cx = 400.5, cy = 300.5;
+    cameraMatrix << fx, 0, cx, 0, fy, cy, 0, 0, 1;
+
+    projectPoints(Mat(objpt)+Mat(delta1), rvec1, tvec1, cameraMatrix, Mat(), imgpt1);
+    projectPoints(Mat(objpt)+Mat(delta2), rvec2, tvec2, cameraMatrix, Mat(), imgpt2);
+
+    vector<Point3f> objptt(n);
+    vector<Point2f> pts(2);
+    vector<Mat> Rv(2), tv(2);
+    Rodrigues(rvec1, Rv[0]);
+    Rodrigues(rvec2, Rv[1]);
+    tv[0] = tvec1; tv[1] = tvec2;
+    for( i = 0; i < n; i++ )
+    {
+        pts[0] = imgpt1[i]; pts[1] = imgpt2[i];
+        objptt[i] = triangulatePoint(pts, Rv, tv, cameraMatrix);
+    }
+    double err = norm(Mat(objpt), Mat(objptt), CV_C);
+    CV_Assert(err < 1e-1);
+}
+
+/*** same camera, different poses */
+static
+Mat getFundamentalMat(const Mat& R1, const Mat& t1,
+		      const Mat& R2, const Mat& t2,
+		      const Mat& cameraMatrix)
+{
+    Mat_<double> R = R2*R1.t(), t = t2 - R*t1;
+    double tx = t.at<double>(0,0), ty = t.at<double>(1,0), tz = t.at<double>(2,0);
+    Mat E = (Mat_<double>(3,3) << 0, -tz, ty, tz, 0, -tx, -ty, tx, 0)*R;
+    Mat iK = cameraMatrix.inv();
+    Mat F = iK.t()*E*iK;
+
+#if 0
+    static bool checked = false;
+    if(!checked)
+    {
+        vector<Point3f> objpoints(100);
+        Mat O(objpoints);
+        randu(O, Scalar::all(-10), Scalar::all(10));
+        vector<Point2f> imgpoints1, imgpoints2;
+        projectPoints(Mat(objpoints), R1, t1, cameraMatrix, Mat(), imgpoints1);
+        projectPoints(Mat(objpoints), R2, t2, cameraMatrix, Mat(), imgpoints2);
+        double* f = (double*)F.data;
+        for( size_t i = 0; i < objpoints.size(); i++ )
+        {
+            Point2f p1 = imgpoints1[i], p2 = imgpoints2[i];
+            double diff = p2.x*(f[0]*p1.x + f[1]*p1.y + f[2]) +
+                 p2.y*(f[3]*p1.x + f[4]*p1.y + f[5]) +
+                f[6]*p1.x + f[7]*p1.y + f[8];
+            CV_Assert(fabs(diff) < 1e-3);
+        }
+        checked = true;
+    }
+#endif
+    return F;
+}
+
+class visual_odometry : unary_function<image_pair, void>
+{
+public:
+    visual_odometry()
+    {
+	read_params("extrinsics.yml");
+    }
+
+    struct {
+	Mat R, T, R1, R2, P1, P2, Q, rmap;
+    } m_params;
+
+    /*** Read in the intrinsic and extrinsic parameters */
+    void
+    read_params(string filename)
+    {
+	cout << "Reading stereo pair params....";
+	FileStorage fs;
+	fs.open(filename, FileStorage::READ);
+	if (!fs.isOpened()) {
+	    cerr << "Failed to open " << filename << endl;
+	    return;
+	}
+	fs["R"]  >> m_params.R; // Read Mat
+	fs["T"]  >> m_params.T;
+	fs["R1"] >> m_params.R1; // Read Mat
+	fs["R2"] >> m_params.R2;
+	fs["P1"] >> m_params.P1; // Read Mat
+	fs["P2"] >> m_params.P2;
+	fs["Q"]  >> m_params.Q;
+//	fs["rmap00"] >> m_params.rmap[0][0]; // Read Mat
+//	fs["rmap01"] >> m_params.rmap[0][1];
+//	fs["rmap10"] >> m_params.rmap[1][0]; // Read Mat
+//	fs["rmap11"] >> m_params.rmap[1][1];
+	cout << "Done" << endl;
+    }
+
+    void operator() (image_pair& pair) {
+	Mat image1 = pair.first, image2 = pair.second;
+	int minHessian = 400;
+	SurfFeatureDetector detector( minHessian );
+	vector<KeyPoint> keypoints1, keypoints2;
+	detector.detect(image1, keypoints1);
+	detector.detect(image2, keypoints2);
+	//-- Step 2: Calculate descriptors (feature vectors)
+	SurfDescriptorExtractor extractor;
+	Mat descriptors1, descriptors2;
+	extractor.compute(image1, keypoints1, descriptors1);
+	extractor.compute(image2, keypoints2, descriptors2);
+	//-- Step 3: Matching descriptor vectors using FLANN matcher
+	FlannBasedMatcher matcher;
+	std::vector<DMatch> matches;
+	matcher.match(descriptors1, descriptors2, matches);
+	double max_dist = 0; double min_dist = 100;
+
+	//-- Quick calculation of max and min distances between keypoints
+	for( int i = 0; i < descriptors1.rows; i++ )
+	{ 
+	    double dist = matches[i].distance;
+	    if (dist < min_dist)
+		min_dist = dist;
+	    if (dist > max_dist)
+		max_dist = dist;
+	}
+
+	printf("-- Max dist : %f \n", max_dist );
+	printf("-- Min dist : %f \n", min_dist );
+
+	//-- Draw only "good" matches (i.e. whose distance is less than 2*min_dist,
+	//-- or a small arbitary value ( 0.02 ) in the event that min_dist is very
+	//-- small)
+	//-- PS.- radiusMatch can also be used here.
+	vector<DMatch> good_matches;
+	for(int i = 0; i < descriptors1.rows; i++ )
+	{
+	    if (matches[i].distance <= max(2*min_dist, 0.02))
+	    {
+		good_matches.push_back(matches[i]);
+	    }
+	}
+
+	//-- Draw only "good" matches
+	Mat img_matches;
+	drawMatches(image1, keypoints1, image2, keypoints2,
+		    good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
+		    vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+	
+	//-- Show detected matches
+	imshow( "Good Matches", img_matches );
+	waitKey();
+	for( int i = 0; i < (int)good_matches.size(); i++ )
+	{
+	    printf( "-- Good Match [%d] Keypoint 1: %d  -- Keypoint 2: %d  \n", i, good_matches[i].queryIdx, good_matches[i].trainIdx );
+	}
+    }
+    
+    void result() {
+	printf("detector results");
+    }
+
+private:
+};
+
+int main(int argc, char** argv)
+{
+    visual_odometry viso;
+    image_pair_generator all(image_pair_generator::string_pair("../00/image_0/%06d.png", "../00/image_1/%06d.png"));
+    image_pair_generator::result_type pair;
+    while (pair = all()) {
+	viso(*pair);
+    }
+    return 0;
+}

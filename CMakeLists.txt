@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 2.8)
+project(viso)
+add_subdirectory(src) 
+add_subdirectory(test)
+enable_testing()
+add_test(NAME mytest COMMAND Test)

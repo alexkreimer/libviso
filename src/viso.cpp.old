@@ -1,0 +1,523 @@
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <iostream>
+#include <memory>
+#include <boost/format.hpp>
+#include <boost/shared_array.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <boost/filesystem.hpp>
+
+extern "C" {
+#include <vl/generic.h>
+#include <vl/covdet.h>
+#include <vl/sift.h>
+}
+
+using namespace cv;
+using namespace std;
+using boost::format;
+using boost::io::group;
+
+typedef pair<Mat, Mat> image_pair;
+
+#define SQUARED(k) (k*k);
+
+typedef enum _VlCovDetDescritporType {
+    VL_COVDET_DESC_NONE = 0,
+    VL_COVDET_DESC_PATCH,
+    VL_COVDET_DESC_SIFT,
+    VL_COVDET_DESC_LIOP,
+    VL_COVDET_DESC_NUM
+} VlCovDetDescriptorType ;
+
+bool verbose = true;
+
+void
+flip_descriptor (float *dst, float const *src)
+{
+  int const BO = 8 ;  /* number of orientation bins */
+  int const BP = 4 ;  /* number of spatial bins     */
+  int i, j, t ;
+
+  for (j = 0 ; j < BP ; ++j) {
+    int jp = BP - 1 - j ;
+    for (i = 0 ; i < BP ; ++i) {
+      int o  = BO * i + BP*BO * j  ;
+      int op = BO * i + BP*BO * jp ;
+      dst [op] = src[o] ;
+      for (t = 1 ; t < BO ; ++t)
+        dst [BO - t + op] = src [t + o] ;
+    }
+  }
+}
+
+void
+plotmatch(Mat &image1,
+	  Mat &image2, 
+	  shared_array<float> feat1,
+	  shared_array<float> feat2,
+	  Pair *match,
+	  int k1,
+	  int k2,
+	  int ND)
+{
+    for(int i=0; i<k1; ++i)
+    {
+	circle(image1, Point2f(feat1[i].frame.y, feat1[i].frame.x), 3, ellipse_color);
+    }
+    for(int i=0; i<k2; ++i)
+    {
+	circle(image2, Point2f(feat2[i].frame.y, feat2[i].frame.x), 3, ellipse_color);
+    }
+    Mat image;
+    hconcat(image1,image2,image);
+    imshow(image);
+}
+
+class image_pair_generator {
+public:
+    typedef boost::optional<image_pair> result_type;
+    typedef pair<string, string> string_pair;
+    image_pair_generator(const string_pair &mask,int index_begin=0)
+	: m_mask(mask), m_index(index_begin) {}
+    result_type operator()() {
+	string name0 = str(boost::format(m_mask.first) % m_index),
+	    name1 = str(boost::format(m_mask.second) % m_index);
+	image_pair pair = make_pair(imread_gray(name0), imread_gray(name1));
+	return pair.first.data && pair.second.data ? result_type(pair) : result_type();
+    }
+private:
+    // for some reason, this is said to produce a better results than directly reading with imread
+    // http://stackoverflow.com/questions/7461075/opencv-image-conversion-from-rgb-to-grayscale-using-imread-giving-poor-results
+    Mat imread_gray(const string &file) const {
+	Mat image = imread(file), image_gray;
+	cvtColor(image, image_gray, CV_BGR2GRAY);
+	return image;
+    }
+    int m_index;
+    string_pair m_mask;
+};
+
+typedef struct
+{
+    int k1;
+    int k2;
+    double score;
+} Pair;
+
+Pair*
+compare_descriptors(Pair* pairs_iterator,
+		    const boost::shared_array<float> desc1,
+		    const boost::shared_array<float> desc2,
+		    int K1, int K2, int ND, float thresh=1.5)
+{
+    int k1, k2;
+    const float maxval = numeric_limits<float>::max();
+    for(k1 = 0; k1<K1; ++k1) {
+	float best = maxval, second_best = maxval;
+	int bestk = -1;
+	/* For each point P2[k2] in the second image... */
+	for(k2=0; k2<K2; ++k2) {
+	    int bin;
+	    float acc = 0;
+	    for(bin = 0 ; bin<ND ; ++bin) {
+		float delta = ((float)desc1[ND*k1+bin])-((float)desc2[ND*k2+bin]);
+		acc += delta*delta ;
+	    }
+	    
+	    /* Filter the best and second best matching point. */
+	    if(acc < best) {
+		second_best = best;
+		best = acc;
+		bestk = k2;
+	    } else if(acc < second_best) {
+		second_best = acc ;
+	    }
+	}
+	/* Lowe's method: accept the match only if unique. */
+	if(thresh * (float) best < (float) second_best &&
+	   bestk != -1) {
+	    pairs_iterator->k1 = k1 ;
+	    pairs_iterator->k2 = bestk ;
+	    pairs_iterator->score = best ;
+	    pairs_iterator++;
+	}
+    }
+    return pairs_iterator;
+}
+
+
+template<class T>
+Mat linspace(const T &a,
+		 const T &b,
+		 int n=100)
+{
+    Mat val(n, 1, DataType<T>::type);
+    T spacing = (b-a-1)/n;
+    for (int i = 0; i<n; ++i)
+	val.at<T>(i) = a + i*spacing;
+    return val;
+}
+
+template<class T>
+Mat range(const T &a,
+	      const T &b,
+	      int step=1)
+{
+    int n = (b-a)/step;
+    Mat val(n, 1, DataType<T>::type);
+}
+
+class CovDet {
+public:
+    typedef float dtype;
+    typedef boost::shared_array<dtype> buf_type;
+
+    /* There are several parameters affecting the patches associated to features */
+
+    double m_edgeThreshold;
+    double m_margin;
+    /* If patchResolution is equal to w, then the patch has a side of 2w+1 pixels.
+       (hence the sampling step in the normalised frame is given by 
+       PatchRelativeExtent/PatchResolution). Extracting higher resolution patches
+       may be needed for larger extent and smaller smoothing. A good setting for 
+       this parameter may be PatchRelativeExtent/PatchRelativeSigma.
+    */
+    int m_patchResolution;
+    /* Taken from here: http://www.vlfeat.org/overview/covdet.html
+       patchRelativeExtent can be used to control how large a patch is relative
+       to the feature scale. The extent is half of the side of the patch domain,
+       a square in the frame reference frame. Since most detectors latch on 
+       image structures (e.g. blobs) that, in the normalised frame reference,
+       have a size comparable to a circle of radius one, setting PatchRelativeExtent
+       to 6 makes the patch about six times largerer than the size of the corner 
+       structure. This is approximately the default extent of SIFT feature descriptors.
+    */
+    double m_patchRelativeExtent;
+    /* A second important parameter is PatchRelativeSigma which expresses the
+       amount of smoothing applied to the image in the normalised patch frame.
+       By default this is set to 1.0, but can be reduced to get sharper patches.
+       Of course, the amount of smoothing is bounded below by the resolution of
+       the input image: a smoothing of, say, less than half a pixel cannot be 
+       recovered due to the limited sampling rate of the latter. Moreover, the
+       patch must be sampled finely enough to avoid aliasing (see next).
+    */
+    double m_patchRelativeSmoothing;
+    double m_octaveResolution;
+    bool m_verbose;
+    Scalar ellipse_color;
+    VlCovDetMethod method;
+public:
+    CovDet(VlCovDetMethod method = VL_COVDET_METHOD_DOG);
+    boost::shared_array<VlCovDetFeature> features_clone() const;
+    boost::shared_array<float> patches() const;
+    void plotframe(Mat &image);
+    void detect(const Mat &image, VlCovDetDescriptorType descriptor_type=VL_COVDET_DESC_SIFT);
+    pair<boost::shared_array<float>,int> descriptors(VlCovDetDescriptorType type) const;
+
+    VlCovDetFeature const *features() const;
+    vl_size features_num() const;
+private:
+    void detect(dtype const *, vl_size, vl_size);
+
+    shared_ptr<VlCovDet> m_vl_covdet;
+    boost::optional<buf_type> m_buf;
+    vl_size m_buf_elems;
+};
+
+CovDet::CovDet(VlCovDetMethod method)
+    : m_vl_covdet(vl_covdet_new(method),ptr_fun(free)),
+      m_edgeThreshold(-1),
+      m_margin(2),
+      m_patchResolution(8),
+      m_patchRelativeExtent(2),
+      m_patchRelativeSmoothing(1),
+      m_buf(),
+      method(method),
+      ellipse_color(0,255,255)
+{
+    vl_covdet_set_peak_threshold(m_vl_covdet.get(), -1);
+// vl_covdet_set_first_octave(covdet, -1) ; // start by doubling the image resolution
+// vl_covdet_set_octave_resolution(covdet, this->octaveResolution) ;
+//BRR! vl_covdet_set_edge_threshold(covdet, edgeThreshold) ;
+}
+
+void
+CovDet::detect(const Mat &image, VlCovDetDescriptorType descriptor_type)
+{
+    assert(image.data);
+    vl_size buf_elems = image.rows*image.cols;
+    if (!m_buf || m_buf_elems != buf_elems)
+    {
+	m_buf_elems = buf_elems;
+	m_buf = boost::optional<buf_type>(new dtype[m_buf_elems]);
+    }
+    for(int k=0,i=0; i<image.rows; ++i) {
+	for(int j=0; j<image.cols; ++j) {
+	    (*m_buf)[k++] = image.at<uchar>(i,j);
+	}
+    }
+    detect((*m_buf).get(), image.rows, image.cols);
+}
+
+void
+CovDet::plotframe(Mat &image)
+{
+    dtype a=0, b=2*m_patchResolution*2;
+    vl_size patch_width = 2*m_patchResolution+1 ;
+    Mat patch(patch_width, patch_width, DataType<dtype>::type, Scalar::all(0)),
+	x = linspace(a, b, b),
+	y = linspace(a, b, b);
+
+//    for_each(x.begin(), x.end(), function<dtype(dtype)>(cos));
+//    for_each(y.begin(), y.end(), function<dtype(dtype)>(sin));
+    int features_num = this->features_num();
+    VlCovDetFeature const *feature = this->features();
+    for(int i=0; i< features_num; ++i)
+    {
+	Point2f center(feature[i].frame.y,feature[i].frame.x);
+	circle(image,center,3,ellipse_color);
+    }
+}
+
+vl_size
+CovDet::features_num() const {
+    return vl_covdet_get_num_features(m_vl_covdet.get());
+}
+
+VlCovDetFeature const *
+CovDet::features() const {
+    return (VlCovDetFeature const*)vl_covdet_get_features(m_vl_covdet.get());    
+}
+
+boost::shared_array<VlCovDetFeature>
+CovDet::features_clone() const {
+    vl_size num = this->features_num();
+    boost::shared_array<VlCovDetFeature> to(new VlCovDetFeature[num]);
+    VlCovDetFeature const* from(this->features());
+    for(int i=0; i<num; ++i) {
+	to[i] = from[i];
+    }
+    return to;
+}
+
+boost::shared_array<float>
+CovDet::patches() const
+{
+    int patch_width = 2*m_patchResolution+1,
+	patch_area = patch_width*patch_width,
+	features_num = this->features_num();
+    VlCovDetFeature const *feature = this->features();
+    boost::shared_array<float> patches(new float[features_num*patch_area]);
+    for (int i = 0; i<features_num; ++i)
+    {
+	vl_covdet_extract_patch_for_frame(m_vl_covdet.get(),
+					  &(patches[i*patch_area]),
+					  m_patchResolution,
+					  m_patchRelativeExtent,
+					  m_patchRelativeSmoothing,
+					  feature[i].frame);
+    }
+    return patches;
+}
+
+pair<boost::shared_array<float>,int>
+CovDet::descriptors(VlCovDetDescriptorType type) const {
+    switch (type) {
+    case VL_COVDET_DESC_SIFT:
+    {
+	int features_num = this->features_num();
+	VlCovDetFeature const *feature = this->features();
+	VlSiftFilt *sift = vl_sift_new(16, 16, 1, 3, 0) ;
+	int dimension = 128,
+	    patch_width = 2*m_patchResolution+1,
+	    patch_area = patch_width*patch_width;
+	double patchStep = (double)m_patchRelativeExtent/m_patchResolution;
+	boost::shared_array<float> temp(new float[dimension]),
+	    desc(new float[dimension*features_num]),
+	    patch(new float[patch_area]),
+	    grad(new float[2*patch_area]);
+	if (verbose) {
+	    printf("vl_covdet: descriptors: type=sift, "
+		   "resolution=%d, extent=%g, smoothing=%g\n",
+		   m_patchResolution, m_patchRelativeExtent,
+		   m_patchRelativeSmoothing);
+	}
+	vl_sift_set_magnif(sift, 3.0) ;
+	for (int i = 0; i < features_num; ++i) {
+	    vl_covdet_extract_patch_for_frame(m_vl_covdet.get(),
+					      patch.get(),
+					      m_patchResolution,
+					      m_patchRelativeExtent,
+					      m_patchRelativeSmoothing,
+					      feature[i].frame);
+	    vl_imgradient_polar_f(grad.get(), grad.get()+1, 2, 2*patch_width,
+				  patch.get(), patch_width, patch_width, patch_width);
+
+            /*
+	      Note: the patch is transposed, so that x and y are swapped.
+	      However, if NBO is not divisible by 4, then the configuration
+	      of the SIFT orientations is not symmetric by rotations of pi/2.
+	      Hence the only option is to rotate the descriptor further by
+	      an angle we need to compute the descriptor rotaed by an additional pi/2
+	      angle. In this manner, x concides and y is flipped.
+	    */
+	    vl_sift_calc_raw_descriptor(sift,
+					grad.get(),
+					temp.get(),
+					patch_width, patch_width,
+					(double)(patch_width-1)/2, (double)(patch_width-1)/2,
+					(double)m_patchRelativeExtent/(3.0*(4 + 1)/2)/patchStep,
+					VL_PI/2) ;
+	    flip_descriptor(&desc[i*dimension], temp.get()) ;
+	}
+	vl_sift_delete(sift);
+	return make_pair(desc, features_num);
+    }
+    }
+}
+
+void
+CovDet::detect(dtype const *image, vl_size rows, vl_size cols)
+{
+    assert(image);
+    auto covdet = m_vl_covdet.get();
+    int status  = vl_covdet_put_image(covdet, image, rows, cols);
+    assert(status == VL_ERR_OK);
+    vl_covdet_detect(covdet);
+    if (m_verbose)
+    {
+	printf("vl_covdet: detector: %s\n",
+	       vl_enumeration_get_by_value(vlCovdetMethods, this->method)->name) ;
+	printf("vl_covdet: peak threshold: %g, edge threshold: %g\n",
+	       vl_covdet_get_peak_threshold(covdet),
+	       vl_covdet_get_edge_threshold(covdet));
+    }
+
+    int features_num = vl_covdet_get_num_features(covdet) ;
+    if (m_verbose)
+    {
+	int i;
+	printf("vl_covdet: %d features suppressed as duplicate (threshold: %g)\n",
+	       (int)vl_covdet_get_num_non_extrema_suppressed(covdet),
+	       vl_covdet_get_non_extrema_suppression_threshold(covdet)) ;
+	switch (this->method) {
+	case VL_COVDET_METHOD_HARRIS_LAPLACE:
+	case VL_COVDET_METHOD_HESSIAN_LAPLACE:
+	{
+	    vl_size numScales ;
+	    int const * numFeaturesPerScale ;
+	    numFeaturesPerScale = (int const*)vl_covdet_get_laplacian_scales_statistics(covdet, &numScales) ;
+	    printf("vl_covdet: Laplacian scales:") ;
+	    for (i = 0 ; i <= (signed)numScales ; ++i) {
+		printf("%d with %d scales;", numFeaturesPerScale[i], i);
+	    }
+	    printf("\n") ;
+	}
+	}
+	printf("vl_covdet: detected %d features\n", features_num);
+
+    }
+    vl_covdet_drop_features_outside(covdet, m_margin) ;
+    features_num = vl_covdet_get_num_features(covdet) ;
+    if (m_verbose) {
+	printf("vl_covdet: kept %d inside the boundary margin (%g)\n",
+	       features_num, m_margin) ;
+    }
+    vl_covdet_extract_affine_shape(covdet);
+    vl_covdet_extract_orientations(covdet);
+}
+
+
+
+class visual_odometry : unary_function<image_pair, void> {
+public:
+    visual_odometry() : covdet(new CovDet()),
+			m_descriptor_type(VL_COVDET_DESC_SIFT)
+    {
+	    read_params("extrinsics.yml");
+    }
+
+    struct {
+	Mat R, T, R1, R2, P1, P2, Q, rmap;
+    } m_params;
+
+    /*** Read in the intrinsic and extrinsic parameters
+     */
+    void
+    read_params(string filename)
+    {
+        cout << "Reading stereo pair params....";
+        FileStorage fs;
+        fs.open(filename, FileStorage::READ);
+        if (!fs.isOpened()) {
+	    cerr << "Failed to open " << filename << endl;
+	    return;
+        }
+	fs["R"]  >> m_params.R; // Read Mat
+	fs["T"]  >> m_params.T;
+	fs["R1"] >> m_params.R1; // Read Mat
+	fs["R2"] >> m_params.R2;
+	fs["P1"] >> m_params.P1; // Read Mat
+	fs["P2"] >> m_params.P2;
+	fs["Q"]  >> m_params.Q;
+//	fs["rmap00"] >> m_params.rmap[0][0]; // Read Mat
+//	fs["rmap01"] >> m_params.rmap[0][1];
+//	fs["rmap10"] >> m_params.rmap[1][0]; // Read Mat
+//	fs["rmap11"] >> m_params.rmap[1][1];
+        cout << "Done" << endl;
+    }
+
+    void operator() (image_pair& pair) {
+	bool verbose = 1;
+	Mat image1 = pair.first, image2 = pair.second;
+	assert(image1.cols == image2.cols);
+	assert(image2.rows == image2.rows);
+
+	auto display = [&](Mat& img) {
+	    if (verbose)
+	    {
+		Mat image_color = img;
+                //cvtColor(img, image_color, CV_GRAY2BGR);
+		covdet->plotframe(image_color);
+		namedWindow("Display window", WINDOW_AUTOSIZE ); // Create a window for display.
+		imshow("Display window", image_color);                // Show our image inside it.
+		waitKey(0); // Wait for a keystroke in the window
+	    }
+	};
+	covdet->detect(image1);
+	auto desc1 = covdet->descriptors(VL_COVDET_DESC_SIFT);
+	covdet->detect(image1, m_descriptor_type);
+	auto desc2 = covdet->descriptors(VL_COVDET_DESC_SIFT);
+
+	int num1 = desc1.second,
+	    num2 = desc2.second,
+	    match_num = min(num1, num2);
+
+	boost::shared_array<Pair> match(new Pair[match_num]);
+	compare_descriptors(match.get(), desc1.first, desc2.first, num1, num2, 128);
+    }
+    
+    void result() {
+	printf("detector results");
+    }
+
+    ~visual_odometry() {
+	covdet.reset();
+    }
+private:
+    shared_ptr<CovDet> covdet;
+    VlCovDetDescriptorType m_descriptor_type;
+};
+
+int main(int argc, char** argv)
+{
+    visual_odometry viso;
+    image_pair_generator all(image_pair_generator::string_pair("../00/image_0/%06d.png", "../00/image_1/%06d.png"));
+    image_pair_generator::result_type pair;
+    while (pair = all()) {
+	viso(*pair);
+    }
+    return 0;
+}
