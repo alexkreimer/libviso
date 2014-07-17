@@ -1,0 +1,4 @@
+libviso
+=======
+
+Visual Odometry library
