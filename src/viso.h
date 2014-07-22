@@ -56,9 +56,11 @@ class StereoImageGenerator {
 public:
     typedef boost::optional<image_pair> result_type;
     typedef pair<string, string> string_pair;
-    StereoImageGenerator(const string_pair &mask,int index_begin=0)
-	: m_mask(mask), m_index(index_begin) {}
+    StereoImageGenerator(const string_pair &mask,int begin=0, int end=INT_MAX)
+	: m_mask(mask), m_index(begin), m_end(end) {}
     result_type operator()() {
+        if (m_index > m_end)
+            return result_type();
 	string name0 = str(boost::format(m_mask.first) % m_index),
                name1 = str(boost::format(m_mask.second) % m_index);
         image_pair pair = make_pair(cv::imread(name0, CV_LOAD_IMAGE_GRAYSCALE),
@@ -67,7 +69,7 @@ public:
 	return pair.first.data && pair.second.data ? result_type(pair) : result_type();
     }
 private:
-    int m_index;
+    int m_index, m_end;
     string_pair m_mask;
 };
 
@@ -89,7 +91,7 @@ findConstrainedCorrespondences(const Mat& F, const KeyPoints& kp1,
 			       double eps, double ratio);
 
 vector<Affine3f>
-sequenceOdometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images, int limit);
+sequenceOdometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images);
 
 
 void

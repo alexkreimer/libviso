@@ -161,6 +161,7 @@ getRMS(const MatrixXf& X1, const MatrixXf& X2, const Affine3f& T,
     err.clear();
     for(int i=0; i<sq_err.cols(); ++i)
     {
+        cout << "sqrt(sq_err(i))=" << sqrt(sq_err(i)) << endl;
         if (sq_err(i)<thresh*thresh)
         {
             inliers.push_back(i);
@@ -496,7 +497,7 @@ kp_match(const Matches& match, int kpi1, int kpi2)
 }
 
 vector<Affine3f>
-sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images, int limit)
+sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 {
     MatrixXf eP1; cv2eigen(P1, eP1);
     cv::SiftFeatureDetector detector;
@@ -521,8 +522,9 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images, int
     // result
     vector<Affine3f> poses;
     bool first = true;
-    for(int iter_num=0; iter_num < limit && (stereo_pair=images()); ++iter_num)
+    for(int iter_num=0; (stereo_pair=images()); ++iter_num)
     {
+        BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
         if (!first) 
         {
             im1.copyTo(im1_prev);
@@ -666,12 +668,11 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images, int
         }
         show4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match, "Circular Match",
               (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
-
         BOOST_LOG_TRIVIAL(info) << match_pcl.size() << " points in circular match";
-        if (match_pcl.size() > 3) 
+        if (match_pcl.size()>3) 
         {
             //number of tries; number of points needed to estimate a model (rotation,translation matrix)
-            int N = 10, model_pts_num = 3, ninliers=0;
+            int N=10, model_pts_num = 3, ninliers=0;
             double min_rms = DBL_MAX, rms=DBL_MAX;
             vector<int> inliers;
             vector<float> err;
@@ -694,8 +695,10 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images, int
                 Eigen::Affine3f T;
                 //T*X2 = X1
                 solveRigidMotion(X1, X2, T);
-                double sample_rms, inlier_rms;
-                getRMS(eigX, eigX_p, T, inliers, err, rms, inlier_rms, .2 /*thresh*/);
+                double sample_rms, inlier_rms, t=.2;
+                inliers.clear();
+                for(int i=0; i<3 || inliers.size()<3; ++i, t*=2)
+                    getRMS(eigX, eigX_p, T, inliers, err, rms, inlier_rms, t /*thresh*/);
                 if (ninliers<inliers.size())
                 {
                     ninliers = inliers.size();

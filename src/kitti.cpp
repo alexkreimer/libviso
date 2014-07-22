@@ -91,7 +91,7 @@ int main(int argc, char** argv)
         StereoImageGenerator images(StereoImageGenerator::string_pair(
                                         (seq_base / seq_name / "image_0" / "%06d.png").string(),
                                         (seq_base / seq_name / "image_1" / "%06d.png").string()));
-        vector<Affine3f> poses = sequenceOdometry(P1, P2, images, 1000);
+        vector<Affine3f> poses = sequenceOdometry(P1, P2, images);
         vector<Affine3f> kitti_poses;
         Affine3f Tk = Affine3f::Identity();
         for(auto &T: poses)
