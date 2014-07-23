@@ -9,6 +9,7 @@
 #include <map>
 #include <stdexcept>
 #include <vector>
+#include <ctime>
 
 #include <ctype.h>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include <stdlib.h>
 #include <string>
 #include <math.h>
+#include <time.h>
 
 #include <boost/format.hpp>
 #include <boost/thread/thread.hpp>
@@ -23,7 +25,6 @@
 #include <boost/log/trivial.hpp>
 
 #include "viso.h"
-
 #include "estimation.h"
 
 using namespace std;
@@ -161,7 +162,6 @@ getRMS(const MatrixXf& X1, const MatrixXf& X2, const Affine3f& T,
     err.clear();
     for(int i=0; i<sq_err.cols(); ++i)
     {
-        cout << "sqrt(sq_err(i))=" << sqrt(sq_err(i)) << endl;
         if (sq_err(i)<thresh*thresh)
         {
             inliers.push_back(i);
@@ -496,12 +496,180 @@ kp_match(const Matches& match, int kpi1, int kpi2)
     return -1;
 }
 
+class CustomFeatureDetector : public cv::FeatureDetector
+{
+protected:
+    void detectImpl(const Mat& image, std::vector<cv::KeyPoint>& kp, const Mat& mask=Mat()) const {}
+};
+
+void
+myhist(const Mat& image)
+{
+    double min_val, max_val;
+    minMaxLoc(image, &min_val, &max_val, 0, 0);
+
+    Mat hist;
+    int bins=300;
+    float range[] = { (float)min_val, (float)max_val} ;
+    const float* hist_range = {range};
+    bool uniform = true; bool accumulate = false;
+    cv::calcHist(&image, 1 /*images num in prev arg*/, 0 /*channels*/, Mat() /*mask*/,
+                 hist, 1, &histSize, &histRange, uniform, accumulate);
+    int hist_w = 1024, hist_h = 800, bin_w = cvRound((double) hist_w/histSize);
+//    Mat histImage(hist_h, hist_w, CV_8UC3, Scalar( 0,0,0));
+//    cout << "histogram values: ";
+//    for( int i = 1; i < histSize; i++ )
+//    {
+//        cv::line(histImage, cv::Point(bin_w*(i-1), hist_h - cvRound(hist.at<float>(i-1))),
+//                 cv::Point(bin_w*(i), hist_h - cvRound(hist.at<float>(i)) ),
+//                 cv::Scalar( 255, 0, 0), 2, 8, 0  );
+//        cout << cvRound(hist.at<float>(i)) << ",";
+//    }
+//    cout << endl;
+//    /// Display
+//    cv::namedWindow("calcHist Demo", CV_WINDOW_AUTOSIZE );
+    //   cv::imshow("calcHist Demo", histImage );
+    // cv::waitKey(0);
+    int scale = 10;
+    minMaxLoc(image, 0, &max_val, 0, 0);
+    Mat histImg = Mat::zeros(hist_w, hist_h, CV_8UC3);
+    for(int h=0; h<hbins; h++)
+    {
+        float binVal = hist.at<float>(h);
+        int intensity = cvRound(binVal*255/maxVal);
+            rectangle( histImg, Point(h*scale, s*scale),
+                        Point( (h+1)*scale - 1, (s+1)*scale - 1),
+                        Scalar::all(intensity),
+                        CV_FILLED );
+        }
+
+    namedWindow( "Source", 1 );
+    imshow( "Source", src );
+
+    namedWindow( "H-S Histogram", 1 );
+    imshow( "H-S Histogram", histImg );
+    waitKey();
+}
+
+void
+showHarris(const Mat& harris_response)
+{
+    Mat dst, dst_norm, dst_norm_scaled;
+    int thresh=90;
+    cv::normalize(harris_response, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
+    cv::convertScaleAbs(dst_norm, dst_norm_scaled);
+    /// Drawing a circle around corners
+    for( int j = 0; j < dst_norm_scaled.rows ; j++ )
+    {
+        for( int i = 0; i < dst_norm_scaled.cols; i++ )
+        {
+            if ((int)dst_norm.at<float>(j,i)>thresh)
+            {
+                circle(dst_norm_scaled, Point(i, j), 3,  Scalar(0), 2, 8, 0);
+            }
+        }
+    }
+    /// Showing the result
+    cv::namedWindow("win", CV_WINDOW_AUTOSIZE );
+    cv::imshow("win", dst_norm_scaled);
+    cv::waitKey(0);
+}
+
+class HarrisFeatureDetector : public cv::FeatureDetector
+{
+public:
+    void detect(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
+        {
+            cout << "my detect is called" << endl;
+            detectImpl(image, kp, mask);
+        }
+protected:
+    void
+    detectImpl(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
+    {
+        const clock_t begin_time = clock();
+        Mat dst, dst_norm, dst_norm_scaled;
+        dst = Mat::zeros(image.size(), DataType<float>::type);
+        int block_size=2, aperture_size=3, thresh=90;
+        double k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
+        cv::cornerHarris(image, dst, block_size, aperture_size, k, cv::BORDER_DEFAULT);
+        myhist(dst);
+        cv::normalize(dst, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
+        for(int j=0; j<dst_norm.rows ; j++ )
+        {
+            for( int i = 0; i<dst_norm_scaled.cols; i++ )
+            {
+                if ((int)dst_norm.at<float>(j,i)>thresh)
+                {
+                    KeyPoint p;
+                    p.pt = Point2f(i,j);
+                    kp.push_back(p);
+                }
+            }
+        }
+        std::cout << "harris time [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC << endl;
+    }
+};
+
+class MyFeatureExtractor : public cv::DescriptorExtractor
+{
+protected:
+    int descriptorType() const
+    {
+        return DataType<float>::type;
+    }
+
+    int 
+    descriptorSize() const
+    {
+        return 16;
+    }
+
+    void
+    computeImpl(const Mat& image, vector<KeyPoint>& kp, Mat& d) const
+    {
+        float val2 = 0;
+        Mat dst2(1,1,CV_32F,&val2);
+        Sobel(image, dst2, dst2.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
+        showHarris(dst2);
+    }
+};
+
+typedef Mat Descriptor;
+
+void
+localMatch(const KeyPoints& kp1, const KeyPoints& kp2,
+           const Descriptor& d1, const Descriptor& d2,
+           Matches& match, double thresh)
+{
+    double min_d = DBL_MAX;
+    Match best_match;
+    for(int i=0; i<kp1.size(); ++i)
+    {
+        for(int j=0; j<kp2.size(); ++j)
+        {
+            double d = norm(kp1.at(i).pt-kp2.at(j).pt);
+            cout << "d=" << d << endl;
+            if (d>thresh)
+                continue;
+            d = cv::norm(d1.col(i)-d2.col(j));
+            cout << "d:" << d << endl;
+            if (d<min_d)
+            {
+                best_match = Match(i,j);
+            }
+        }
+        match.push_back(best_match);
+    }
+}
+
 vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 {
     MatrixXf eP1; cv2eigen(P1, eP1);
-    cv::SiftFeatureDetector detector;
-    cv::SiftDescriptorExtractor extractor;
+//    cv::SiftFeatureDetector detector;
+    HarrisFeatureDetector detector;
+    MyFeatureExtractor extractor;
     StereoImageGenerator::result_type stereo_pair;
     Mat F = F_from_P<double>(P1,P2);
     if (F.at<double>(2,2) > DBL_MIN)
@@ -543,11 +711,12 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         im2 = (*stereo_pair).second;
         detector.detect(im1, kp1);
 	detector.detect(im2, kp2);
-        extractor.compute(im1, kp1, d1);
-	extractor.compute(im2, kp2, d2);
 	BOOST_LOG_TRIVIAL(info) << kp1.size() << " keypoints found in the 1st image";
 	BOOST_LOG_TRIVIAL(info) << kp2.size() << " keypoints found in the 2nd image";
-        match_epip_constraint(F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 2 /*sampson distance*/, .5 /*algebric error*/);
+        extractor.compute(im1, kp1, d1);
+	extractor.compute(im2, kp2, d2);
+        //match_epip_constraint(F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 2 /*sampson distance*/, .5 /*algebric error*/);
+        localMatch(kp1, kp2, d1, d2, match, 20);
 	BOOST_LOG_TRIVIAL(info) << match.size() << " matches passed epipolar constraint";
         //show2(im1, im2, kp1, kp2, match, "current stereo pair",50);
 	cv::Mat x1(2, match.size(), CV_32FC1), x2(2, match.size(), CV_32FC1);
