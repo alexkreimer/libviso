@@ -61,8 +61,15 @@ savePoses(const string& file_name, const vector<Affine3f>& poses) {
 
 void init_log()
 {
-    logging::add_file_log("kitti.log");
-    logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::info);
+    logging::add_file_log
+    (
+        keywords::file_name = "kitti.log",
+        keywords::rotation_size = 10 * 1024 * 1024,
+        keywords::time_based_rotation = sinks::file::rotation_at_time_point(0, 0, 0),
+        keywords::format = "[%TimeStamp%]: %Message%",
+        keywords::auto_flush = true
+    );
+    logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::debug);
 }
 
 int main(int argc, char** argv)
@@ -72,12 +79,11 @@ int main(int argc, char** argv)
         cout << "usage: demo result_sha" << endl;
         exit(1);
     }
-    
+//    init_log();
     char *result_sha = argv[1], *KITTI_HOME  = std::getenv("KITTI_HOME");
-    char *KITTI_HOME_DEFAULT="./";
-    if (!KITTI_HOME)
-        KITTI_HOME=KITTI_HOME_DEFAULT;
-    fs::path result_dir = fs::path(KITTI_HOME) / "results" / result_sha,
+    assert(KITTI_HOME);
+    fs::path
+        result_dir = fs::path(KITTI_HOME) / "results" / result_sha,
         seq_base = fs::path(KITTI_HOME) / "sequences";
     vector<string> seq_names = {"00"};
     for(auto &seq_name: seq_names)
@@ -90,7 +96,7 @@ int main(int argc, char** argv)
         assert(loadCalib(calib_file_name, P1, P2));
         StereoImageGenerator images(StereoImageGenerator::string_pair(
                                         (seq_base / seq_name / "image_0" / "%06d.png").string(),
-                                        (seq_base / seq_name / "image_1" / "%06d.png").string()));
+                                        (seq_base / seq_name / "image_1" / "%06d.png").string()),0, 70);
         vector<Affine3f> poses = sequenceOdometry(P1, P2, images);
         vector<Affine3f> kitti_poses;
         Affine3f Tk = Affine3f::Identity();

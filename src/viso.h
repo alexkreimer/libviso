@@ -108,8 +108,7 @@ match_epip_constraint(const cv::Mat& F, const KeyPoints& kp1,
                       const Descriptors& d2, Matches &match,
                       double ratio, double samp_thresh, double alg_thresh);
 void
-show2(const cv::Mat& m1, const cv::Mat& m2, 
-      const KeyPoints& kp1, const KeyPoints& kp2,
-      const Matches &match, const string &title, 
-      const string &file_name, int lim=50);
+save2(const cv::Mat& m1, const cv::Mat& m2, const KeyPoints& kp1,
+      const KeyPoints& kp2, const Matches &match, const string &file_name,
+      int lim=50);
 #endif

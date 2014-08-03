@@ -19,3 +19,6 @@ target_link_libraries(kitti viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
 
 add_executable(registration registration.cpp)
 target_link_libraries(registration viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
+
+add_executable(mod3d mod3d.cpp)
+target_link_libraries(mod3d viso ${OpenCV_LIBS} ${Boost_LIBRARIES})

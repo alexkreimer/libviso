@@ -35,6 +35,27 @@ using cv::Vec4i;
 using cv::DataType;
 using cv::FM_RANSAC;
 
+class Odometer
+{
+    const cv::FeatureDetector &detector;
+    const cv::DescriptorExtractor &descriptor;
+};
+
+void
+radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius=10.0f);
+
+Mat
+kp2mat(const KeyPoints& kp)
+{
+    Mat mat(kp.size(), 2, DataType<float>::type, Scalar(0));
+    for(int i=0; i<kp.size(); ++i)
+    {
+        mat.at<float>(i,0) = kp.at(i).pt.x;
+        mat.at<float>(i,1) = kp.at(i).pt.y;
+    }
+    return mat;
+}
+
 /* eucledian to homogenious */
 MatrixXf e2h(const MatrixXf &xe)
 {
@@ -61,6 +82,25 @@ drawPoints(Mat& im, const MatrixXf& x, const Scalar& color, int thickness, int l
     for(int i=0; i<x.cols(); ++i)
         circle(im, cv::Point(x(0,i), x(1,i)), thickness, color, linetype);
 }
+
+void
+drawPoints(Mat& im, const KeyPoints& kp, int lim, const Scalar& color,
+           int thickness, int linetype)
+{
+    for(int i=0; i<kp.size() && i<lim; ++i)
+        circle(im, kp.at(i).pt, thickness, color, linetype);
+}
+
+void
+save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_MAX,
+      Scalar color=Scalar(255,0,0), int thickness=2, int linetype=-11)
+{
+    Mat im_rgb;
+    cvtColor(im, im_rgb, CV_GRAY2RGB);
+    drawPoints(im_rgb, kp, lim, color, thickness, linetype);
+    cv::imwrite(file_name, im_rgb);
+}
+
 
 Eigen::MatrixXf
 projectPoints(const MatrixXf& X, const MatrixXf P)
@@ -139,7 +179,7 @@ algebricDistance(const Mat& F, const Points2f& p1, const Points2f& p2)
 set<int>
 randomsample(int k, int n)
 {
-    BOOST_ASSERT_MSG(k<n, (boost::format("k=%d,n=%d")%k%n).str().c_str());
+    BOOST_ASSERT_MSG(k<=n, (boost::format("k=%d,n=%d")%k%n).str().c_str());
     std::set<int> s;
     while(s.size()<k)
         s.insert(round(rand() % n));
@@ -154,6 +194,7 @@ getRMS(const MatrixXf& X1, const MatrixXf& X2, const Affine3f& T,
 {
     assert(X1.rows()==3);
     assert(X2.rows()==3);
+    assert(X1.cols()==X2.cols());
     MatrixXf X1h = e2h(X1), X2h = e2h(X2);
     MatrixXf X2h_rot = T.matrix()*X2h;
     MatrixXf delta = h2e(X1h)-h2e(X2h_rot);
@@ -206,23 +247,23 @@ collect_matches(const KeyPoints& kp1, const KeyPoints &kp2,
    m1, m2 must have the same number of columns
 */
 void
-show2(const cv::Mat& im1, const cv::Mat& im2, 
-      const KeyPoints& kp1, const KeyPoints& kp2,
-      const Matches &match, const string &title, const string& file_name, int lim)
+save2(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
+      const KeyPoints& kp2, const Matches &match, const string& file_name,
+      int lim)
 {
-    cv::Mat im_t = vcat<uchar>(im1, im2);
-    cv::Mat im;
+    cv::Mat im_t = vcat<uchar>(im1, im2), im;
     cvtColor(im_t, im, CV_GRAY2RGB);
-    //cv::namedWindow(title, cv::WINDOW_NORMAL);
+#if 0
     for (int i=0; i<kp1.size(); ++i)
     {
-        //circle(im, kp1.at(i).pt, 3, Scalar(255,255,0), -1);
+        circle(im, kp1.at(i).pt, 3, Scalar(255,255,0), -1);
     }
     for (int i=0; i<kp2.size(); ++i)
     {
         Point center(kp2.at(i).pt.x, kp2.at(i).pt.y+im1.rows);
-        //circle(im, center, 3, Scalar(255,250,0), -1);
+        circle(im, center, 3, Scalar(255,250,0), -1);
     }
+#endif
     for(int i=0; i<match.size() && i<lim; ++i)
     {
         Point 
@@ -232,115 +273,20 @@ show2(const cv::Mat& im1, const cv::Mat& im2,
         line(im, p1, p2, Scalar(255));
     }
     imwrite(file_name, im);
-
-    //imshow(title, im);
-    //waitKey(0);
-    //cv::destroyWindow(title);
 }
 
-/* concatenate a pair of matrices vertically
-   m1, m2 must have the same number of columns
-*/
 void
-show4(const Mat& im1, const Mat& im1_prev,
+save4(const Mat& im1, const Mat& im1_prev,
       const Mat& im2, const Mat& im2_prev,
       const KeyPoints& kp1, const KeyPoints& kp1_prev,
       const KeyPoints& kp2, const KeyPoints& kp2_prev,
-      const Matches& match, const Matches& match_prev,
-      const Matches &match11, const Matches &match22,
-      const string &title="title", const char *file_name="",
+      const vector<Vec4i>& ind, const string& file_name,
       int lim=INT_MAX)
 {
     Mat im_t = vcat<uchar>(im1, im1_prev), im_t1 = vcat<uchar>(im2, im2_prev);
     Mat im_t2 = hcat<uchar>(im_t, im_t1);
     cv::Mat im;
     cvtColor(im_t2, im, CV_GRAY2RGB);
-    cv::namedWindow(title, cv::WINDOW_NORMAL);
-    Scalar magenta = Scalar(255, 255,0);
-    Scalar green = Scalar(0, 255, 0);
-    Scalar yellow = Scalar(0, 255, 255);
-    Scalar red = Scalar(0, 0, 255);
-    for (int i=0; i<kp1.size(); ++i)
-    {
-        circle(im, kp1.at(i).pt, 1, magenta, -1);
-    }
-    for (int i=0; i<kp2.size(); ++i)
-    {
-        Point c(kp2.at(i).pt.x+im1.cols, kp2.at(i).pt.y);
-        circle(im, c, 1, magenta, -1);
-    }
-    for (int i=0; i<kp1_prev.size(); ++i)
-    {
-        Point c(kp1_prev.at(i).pt.x, kp1_prev.at(i).pt.y+im1.rows);
-        circle(im, c, 1, magenta, -1);
-    }
-    for (int i=0; i<kp2_prev.size(); ++i)
-    {
-        Point c(kp2_prev.at(i).pt.x+im1.cols, kp2_prev.at(i).pt.y+im1.rows);
-        circle(im, c, 1, magenta, -1);
-    }
-    for(int i=0; i<match.size() && i<lim; ++i)
-    {
-        Point 
-            p1 = kp1[match.at(i)[0]].pt,
-            p2 = kp2[match.at(i)[1]].pt;
-        p2.x += im1.cols;
-        circle(im, p1, 3, red, 1);
-        circle(im, p2, 3, red, 1);
-        line(im, p1, p2, red);
-    }
-    for(int i=0; i<match_prev.size() && i<lim; ++i)
-    {
-        Point 
-            p1 = kp1_prev[match_prev.at(i)[0]].pt,
-            p2 = kp2_prev[match_prev.at(i)[1]].pt;
-        p2.y += im1.rows;
-        p2.x += im1.cols;
-        p1.y += im1.rows;
-        circle(im, p1, 3, red, 1);
-        circle(im, p2, 3, red, 1);
-        line(im, p1, p2, red);
-    }
-    for(int i=0; i<match11.size() && i<lim; ++i)
-    {
-        Point 
-            p1 = kp1[match11.at(i)[0]].pt,
-            p2 = kp1_prev[match11.at(i)[1]].pt;
-        p2.y += im1.rows;
-        circle(im, p1, 3, green, 1);
-        circle(im, p2, 3, green, 1);
-        line(im, p1, p2, green);
-    }
-    for(int i=0; i<match22.size() && i<lim; ++i)
-    {
-        Point 
-            p1 = kp2[match22.at(i)[0]].pt,
-            p2 = kp2_prev[match22.at(i)[1]].pt;
-        p1.x += im1.cols;
-        p2.x += im1.cols;
-        p2.y += im1.rows;
-        circle(im, p1, 3, green, 1);
-        circle(im, p2, 3, green, 1);
-        line(im, p1, p2, green);
-    }
-    imshow(title, im);
-    waitKey(0);
-    cv::destroyWindow(title);
-}
-
-void
-show4(const Mat& im1, const Mat& im1_prev,
-      const Mat& im2, const Mat& im2_prev,
-      const KeyPoints& kp1, const KeyPoints& kp1_prev,
-      const KeyPoints& kp2, const KeyPoints& kp2_prev,
-      const vector<Vec4i>& ind, const string &title="title",
-      const string& file_name="", int lim=INT_MAX)
-{
-    Mat im_t = vcat<uchar>(im1, im1_prev), im_t1 = vcat<uchar>(im2, im2_prev);
-    Mat im_t2 = hcat<uchar>(im_t, im_t1);
-    cv::Mat im;
-    cvtColor(im_t2, im, CV_GRAY2RGB);
-    cv::namedWindow(title, cv::WINDOW_NORMAL);
     Scalar magenta = Scalar(255, 255,0);
     Scalar green = Scalar(0, 255, 0);
     Scalar yellow = Scalar(0, 255, 255);
@@ -361,12 +307,9 @@ show4(const Mat& im1, const Mat& im1_prev,
         line(im, p4, p3, green);
         line(im, p3, p1, green);
     }
-//    imshow(title, im);
-//    waitKey(0);
-    if (file_name != "")
-        imwrite(file_name, im);
-//    cv::destroyWindow(title);
+    imwrite(file_name, im);
 }
+
 
 /*
  * p2'Fp1 = 0
@@ -381,6 +324,51 @@ sampsonDistance(const Mat& F,const Point2f& p1,const Point2f &p2)
         f3s = F.at<double>(0,1)*F.at<double>(0,1);
     float x1s = p1.x*p1.x, y1s = p1.y*p1.y, x2s = p2.x*p2.x, y2s = p2.y*p2.y;
     return algebricDistance(F, p1, p2)/(f0s*x1s+f1s*y1s+f0s*x2s+f3s*y2s);
+}
+// match descriptors d1 vs. d2 using L2 distance
+// and David Lowe 2nd best
+void
+match_l2_2nd_best_flann(const KeyPoints& kp1, const KeyPoints& kp2,
+                        const cv::Mat& d1, const cv::Mat& d2,
+                        Matches& match, float ratio=.65)
+{
+    // each row of d1 and d2 is a descriptor
+    assert(d1.cols == d2.cols);
+    match.clear();
+    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
+    // create kd-tree of kp2 locations
+    cv::flann::Index tree(mat_kp2, cv::flann::KDTreeIndexParams(16));
+    int MAX_NEIGHBORS=50;
+    Mat neighbors(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
+    // search for neighbors. upon return neighbors.row(i) contains 
+    // indices into kp2 of nearest neighbor points
+    radiusSearch(tree, mat_kp1, neighbors, 30.0f);
+    for(int i=0; i<kp1.size(); ++i)
+    {
+        float best_d1 = FLT_MAX, best_d2 = FLT_MAX;
+        int best_idx = -1;
+        for(int j=0; j<MAX_NEIGHBORS; ++j)
+        {
+            int cur_neighbor = neighbors.at<int>(i,j);
+            if (cur_neighbor<0)
+                break;
+            double d = cv::norm(d2.row(cur_neighbor)-d1.row(i));
+            if (d <= best_d1)
+            {
+                best_d2 = best_d1;
+                best_d1 = d;
+                best_idx = j;
+            } else if (d <= best_d2) {
+                best_d2 = d;
+            }
+        }
+        // Lowe's 2nd best
+        if (best_idx >= 0 && best_d1<best_d2*ratio)
+        {
+            match.push_back(Match(i, best_idx, best_d1));
+        }
+    }
+    std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
 }
 
 // match descriptors d1 vs. d2 using L2 distance
@@ -459,6 +447,92 @@ match_epip_constraint(const cv::Mat& F, const KeyPoints& kp1,
     std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
 }
 
+void
+radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius)
+{
+    Mat dist(1, neighbors.cols, CV_32FC1);
+    for(int i=0; i<points.rows; i++)
+    {
+        Mat p(1, points.cols, CV_32FC1, points.ptr<float>(i)),
+            n(1, neighbors.cols, CV_32SC1, neighbors.ptr<int>(i));
+        int found=index.radiusSearch(p, n, dist, radius, neighbors.cols, cv::flann::SearchParams());
+//        cout << "found=" << found << endl;
+//        cout << "neighbors:" << _str<int>(neighbors.row(i)) << endl;
+    }
+}
+
+/* p2Fp1=0 */
+void
+match_epip_constraint_flann(const Mat& im1, const Mat& im2, const cv::Mat& F, const KeyPoints& kp1, 
+                            const KeyPoints& kp2, const Descriptors& d1,
+                            const Descriptors& d2, Matches &match,
+                            double ratio, double samp_thresh, double alg_thresh)
+{
+    // store (x,y) of the keypoints in the Mat arrays
+    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
+    // create kd-tree of kp2 locations
+    cv::flann::Index tree(mat_kp2, cv::flann::KDTreeIndexParams(16));
+//    cv::flann::Index linear(mat_kp2, cv::flann::LinearIndexParams());
+    int MAX_NEIGHBORS=50;
+    Mat neighbors(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
+    //      neighbors1(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
+    // search for neighbors. upon return neighbors.row(i) contains 
+    // indices into kp2 of nearest neighbor points
+    radiusSearch(tree, mat_kp1, neighbors, 300.0f);
+//    radiusSearch(linear, mat_kp1, neighbors1, 300.0f);
+
+    match.clear();
+    for(int i=0; i<kp1.size(); ++i)
+    {
+//        cout << "neighbors.row(i)=" << neighbors.row(i) << endl;
+        Point2f p1 = kp1[i].pt;
+        double best_d1 = DBL_MAX, best_d2 = DBL_MAX;
+        pair<double,double> best_e;
+        int best_idx = -1;
+        int nn=0;
+        KeyPoints tmp2;
+        for(int j=0; j<MAX_NEIGHBORS; ++j,++nn)
+        {
+            int cur_neighbor = neighbors.at<int>(i,j);
+            if (cur_neighbor<0)
+                break;
+            Point2f p2 = kp2.at(cur_neighbor).pt;
+            tmp2.push_back(kp2.at(cur_neighbor));
+            pair<double,double> e = make_pair(sampsonDistance(F, p1, p2), samp_thresh);
+            if (!std::isfinite(e.first))
+                e = make_pair(algebricDistance(F, p1, p2), alg_thresh);
+            if (best_e.first > best_e.second)
+                continue;
+            double d = cv::norm(d2.row(cur_neighbor)-d1.row(i), cv::NORM_L1);
+            if (d <= best_d1)
+            {
+                best_d2 = best_d1;
+                best_d1 = d;
+                best_idx = cur_neighbor;
+                best_e = e;
+            } else if (d <= best_d2)
+                best_d2 = d;
+        }
+#if 0
+        if (nn>0)
+        {
+            KeyPoints tmp1;
+            tmp1.push_back(kp1[i]);
+            save1(im1, tmp1, (boost::format("left_tmp_%03d.jpg")%i).str().c_str());
+            save1(im2, tmp2, (boost::format("right_tmp_%03d.jpg")%i).str().c_str());
+        }
+#endif
+//        if (nn>0)
+//            cout << "i=" << i << "nn="<< nn << endl;
+        // Lowe's 2nd best
+        if (best_idx >= 0 /*&& best_d1 < best_d2*ratio*/)
+        {
+            match.push_back(Match(i, best_idx, best_d1));
+        }
+    }
+    std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
+}
+
 /*
  * match is a vector of pairs that store keypoint correspondences
  * Let m = match[k], then m[0] is the index of keypoint in the first view,
@@ -509,53 +583,56 @@ myhist(const Mat& image)
     minMaxLoc(image, &min_val, &max_val, 0, 0);
 
     Mat hist;
-    int bins=300;
+    int hist_size=300;
     float range[] = { (float)min_val, (float)max_val} ;
     const float* hist_range = {range};
     bool uniform = true; bool accumulate = false;
     cv::calcHist(&image, 1 /*images num in prev arg*/, 0 /*channels*/, Mat() /*mask*/,
-                 hist, 1, &histSize, &histRange, uniform, accumulate);
-    int hist_w = 1024, hist_h = 800, bin_w = cvRound((double) hist_w/histSize);
-//    Mat histImage(hist_h, hist_w, CV_8UC3, Scalar( 0,0,0));
-//    cout << "histogram values: ";
-//    for( int i = 1; i < histSize; i++ )
-//    {
-//        cv::line(histImage, cv::Point(bin_w*(i-1), hist_h - cvRound(hist.at<float>(i-1))),
-//                 cv::Point(bin_w*(i), hist_h - cvRound(hist.at<float>(i)) ),
-//                 cv::Scalar( 255, 0, 0), 2, 8, 0  );
-//        cout << cvRound(hist.at<float>(i)) << ",";
-//    }
-//    cout << endl;
-//    /// Display
-//    cv::namedWindow("calcHist Demo", CV_WINDOW_AUTOSIZE );
-    //   cv::imshow("calcHist Demo", histImage );
-    // cv::waitKey(0);
-    int scale = 10;
-    minMaxLoc(image, 0, &max_val, 0, 0);
-    Mat histImg = Mat::zeros(hist_w, hist_h, CV_8UC3);
-    for(int h=0; h<hbins; h++)
+                 hist, 1, &hist_size, &hist_range, uniform, accumulate);
+    int hist_w = 1024, hist_h = 800, bin_w = cvRound((double) hist_w/hist_size);
+    Mat histImage(hist_h, hist_w, CV_8UC3, Scalar( 0,0,0));
+    cout << "histogram values: ";
+    for(int i=1; i<hist_size; i++)
     {
-        float binVal = hist.at<float>(h);
-        int intensity = cvRound(binVal*255/maxVal);
-            rectangle( histImg, Point(h*scale, s*scale),
-                        Point( (h+1)*scale - 1, (s+1)*scale - 1),
-                        Scalar::all(intensity),
-                        CV_FILLED );
-        }
-
-    namedWindow( "Source", 1 );
-    imshow( "Source", src );
-
-    namedWindow( "H-S Histogram", 1 );
-    imshow( "H-S Histogram", histImg );
-    waitKey();
+        cv::line(histImage, cv::Point(bin_w*(i-1), hist_h - cvRound(hist.at<float>(i-1))),
+                 cv::Point(bin_w*(i), hist_h - cvRound(hist.at<float>(i)) ),
+                 cv::Scalar( 255, 0, 0), 2, 8, 0  );
+        cout << cvRound(hist.at<float>(i)) << ",";
+    }
+    cout << endl;
+    /// Display
+    cv::namedWindow("calcHist Demo", CV_WINDOW_AUTOSIZE );
+    cv::imshow("calcHist Demo", histImage );
+    cv::waitKey(0);
 }
 
 void
-showHarris(const Mat& harris_response)
+saveHarrisCorners(const Mat& harris_response, int thresh, const string& file_name)
 {
     Mat dst, dst_norm, dst_norm_scaled;
-    int thresh=90;
+    Scalar RED = Scalar(0,0,255), color=RED;
+    int thickness=5, linetype=1;
+    cv::normalize(harris_response, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
+    cv::convertScaleAbs(dst_norm, dst_norm_scaled);
+    Mat im_rgb;
+    cvtColor(dst_norm_scaled, im_rgb, CV_GRAY2RGB);
+    for( int j = 0; j < dst_norm_scaled.rows ; j++ )
+    {
+        for( int i = 0; i < dst_norm_scaled.cols; i++ )
+        {
+            if ((int)dst_norm.at<float>(j,i)>thresh)
+            {
+                circle(im_rgb, Point(i,j), thickness, color, linetype);
+            }
+        }
+    }
+    cv::imwrite(file_name, dst_norm_scaled);
+}
+
+void
+showHarris(const Mat& harris_response, int thresh)
+{
+    Mat dst, dst_norm, dst_norm_scaled;
     cv::normalize(harris_response, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
     cv::convertScaleAbs(dst_norm, dst_norm_scaled);
     /// Drawing a circle around corners
@@ -578,42 +655,44 @@ showHarris(const Mat& harris_response)
 class HarrisFeatureDetector : public cv::FeatureDetector
 {
 public:
-    void detect(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
-        {
-            cout << "my detect is called" << endl;
-            detectImpl(image, kp, mask);
-        }
+    // descriptor radius is used only to init KeyPoints
+    HarrisFeatureDetector(int descriptor_radius) 
+        : m_descriptor_radius(descriptor_radius) {}
+
 protected:
     void
     detectImpl(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
     {
-        const clock_t begin_time = clock();
-        Mat dst, dst_norm, dst_norm_scaled;
+        Mat dst, dst_norm;
         dst = Mat::zeros(image.size(), DataType<float>::type);
-        int block_size=2, aperture_size=3, thresh=90;
+        int block_size=3, aperture_size=5, thresh=80;
         double k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
         cv::cornerHarris(image, dst, block_size, aperture_size, k, cv::BORDER_DEFAULT);
-        myhist(dst);
         cv::normalize(dst, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
         for(int j=0; j<dst_norm.rows ; j++ )
         {
-            for( int i = 0; i<dst_norm_scaled.cols; i++ )
+            for( int i = 0; i<dst_norm.cols; i++ )
             {
                 if ((int)dst_norm.at<float>(j,i)>thresh)
                 {
-                    KeyPoint p;
-                    p.pt = Point2f(i,j);
-                    kp.push_back(p);
+                    kp.push_back(KeyPoint(Point2f(i,j), 2*m_descriptor_radius+1));
                 }
             }
         }
-        std::cout << "harris time [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC << endl;
+
     }
+private:
+    int m_descriptor_radius;
 };
 
 class MyFeatureExtractor : public cv::DescriptorExtractor
 {
+public:
+    MyFeatureExtractor(int descriptor_radius) 
+        : m_descriptor_radius(descriptor_radius) {}
 protected:
+    int m_descriptor_radius;
+
     int descriptorType() const
     {
         return DataType<float>::type;
@@ -622,16 +701,29 @@ protected:
     int 
     descriptorSize() const
     {
-        return 16;
+        return (2*m_descriptor_radius+1)*(2*m_descriptor_radius+1);
     }
 
+    /* TODO: check border */
     void
     computeImpl(const Mat& image, vector<KeyPoint>& kp, Mat& d) const
     {
-        float val2 = 0;
-        Mat dst2(1,1,CV_32F,&val2);
-        Sobel(image, dst2, dst2.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
-        showHarris(dst2);
+        Mat sob(image.rows, image.cols, CV_32F, Scalar(0));
+        d = Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0));
+        Sobel(image, sob, sob.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
+        for(int k=0; k<kp.size(); ++k)
+        {
+            Point2i p = kp.at(k).pt;
+            for(int i=-m_descriptor_radius,col=0; i<m_descriptor_radius; ++i)
+            {
+                for(int j=-m_descriptor_radius; j<m_descriptor_radius; ++j,++col)
+                {
+                    d.at<float>(k,col) = 
+                        (p.y+i>0 && p.y+i<image.rows && p.x+j>0 && p.x+j<image.cols) ?
+                        sob.at<float>(p.y+i, p.x+j) : 0;
+                }
+            }
+        }
     }
 };
 
@@ -649,11 +741,9 @@ localMatch(const KeyPoints& kp1, const KeyPoints& kp2,
         for(int j=0; j<kp2.size(); ++j)
         {
             double d = norm(kp1.at(i).pt-kp2.at(j).pt);
-            cout << "d=" << d << endl;
             if (d>thresh)
                 continue;
             d = cv::norm(d1.col(i)-d2.col(j));
-            cout << "d:" << d << endl;
             if (d<min_d)
             {
                 best_match = Match(i,j);
@@ -663,13 +753,15 @@ localMatch(const KeyPoints& kp1, const KeyPoints& kp2,
     }
 }
 
+// stereo odometry
+
 vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 {
     MatrixXf eP1; cv2eigen(P1, eP1);
 //    cv::SiftFeatureDetector detector;
-    HarrisFeatureDetector detector;
-    MyFeatureExtractor extractor;
+    HarrisFeatureDetector detector(5);
+    MyFeatureExtractor extractor(5);
     StereoImageGenerator::result_type stereo_pair;
     Mat F = F_from_P<double>(P1,P2);
     if (F.at<double>(2,2) > DBL_MIN)
@@ -690,7 +782,9 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
     // result
     vector<Affine3f> poses;
     bool first = true;
-    for(int iter_num=0; (stereo_pair=images()); ++iter_num)
+    const clock_t begin_time = clock();
+    int iter_num;
+    for(iter_num=0; (stereo_pair=images()); ++iter_num)
     {
         BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
         if (!first) 
@@ -709,16 +803,19 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         }
         im1 = (*stereo_pair).first;
         im2 = (*stereo_pair).second;
-        detector.detect(im1, kp1);
-	detector.detect(im2, kp2);
+        assert(im1.data && im2.data);
+        detector.detect(im1,kp1);
+	detector.detect(im2,kp2);
 	BOOST_LOG_TRIVIAL(info) << kp1.size() << " keypoints found in the 1st image";
 	BOOST_LOG_TRIVIAL(info) << kp2.size() << " keypoints found in the 2nd image";
         extractor.compute(im1, kp1, d1);
 	extractor.compute(im2, kp2, d2);
-        //match_epip_constraint(F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 2 /*sampson distance*/, .5 /*algebric error*/);
-        localMatch(kp1, kp2, d1, d2, match, 20);
+        save1(im1, kp1, (boost::format("left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        save1(im2, kp2, (boost::format("right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        match_epip_constraint_flann(im1, im2, F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 2 /*sampson distance*/, .5 /*algebric error*/);
+        //localMatch(kp1, kp2, d1, d2, match, 20);
 	BOOST_LOG_TRIVIAL(info) << match.size() << " matches passed epipolar constraint";
-        //show2(im1, im2, kp1, kp2, match, "current stereo pair",50);
+        save2(im1, im2, kp1, kp2, match, (boost::format("match_%03d.jpg") % iter_num).str().c_str(), 10);
 	cv::Mat x1(2, match.size(), CV_32FC1), x2(2, match.size(), CV_32FC1);
 	for(int i=0; i<match.size(); i++)
 	{
@@ -739,67 +836,22 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         Matches match11, match12, match22, match21;
         Mat F11, F22, F12, F21;
         Points2f p1, p1_prev, p2, p2_prev;
-        match_l2_2nd_best(d1, d1_prev, match11);
+        match_l2_2nd_best_flann(kp1, kp1_prev, d1, d1_prev, match11);
         //show2(im1, im1_prev, kp1, kp1_prev, match11, "Left view match: current vs prev (2nd best)");
         collect_matches(kp1, kp1_prev, match11, p1, p1_prev);
-        F11 = findFundamentalMat(p1, p1_prev, cv::FM_RANSAC);
-        vector<int> outliers;
-        //F11 = estimateFundamental(p1, p1_prev, outliers);
-        if (1)
-        {
-            match_epip_constraint(F11, kp1, kp1_prev, d1, d1_prev, match11, .8, 2, .1);
-        } else {
-            // yakk!
-            Matches tmp;
-            for(int j=0; j<match11.size(); ++j)
-            {
-                bool outlier=false;
-                for(int i=0; i<outliers.size(); ++i)
-                {
-                    if (j==outliers[i])
-                    {
-                        outlier = true;
-                        break;
-                    }
-                }
-                if (!outlier)
-                    tmp.push_back(match11[j]);
-            }
-            match11 = tmp;
-        }
-        show2(im1, im1_prev, kp1, kp1_prev, match11, "Left view match: current vs prev (2nd best + epip constraint)", 
-              (boost::format("left_match_%03d.jpg") % iter_num).str().c_str(), 15);
+        F11 = findFundamentalMat(p1, p1_prev, cv::FM_RANSAC, 3, .99999);
+        match_epip_constraint(F11, kp1, kp1_prev, d1, d1_prev, match11, .8, 3, .1);
+        save2(im1, im1_prev, kp1, kp1_prev, match11,
+              (boost::format("ll_%s.jpg")%iter_num).str().c_str(), 15);
         BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
         assert(F11.type()==6);
-        match_l2_2nd_best(d2, d2_prev, match22);
+        match_l2_2nd_best_flann(kp2, kp2_prev, d2, d2_prev, match22);
         collect_matches(kp2, kp2_prev, match22, p2, p2_prev);
         F22 = findFundamentalMat(p2, p2_prev, cv::FM_RANSAC);
-        //F22 = estimateFundamental(p2, p2_prev, outliers);
-        if (1) {
-            match_epip_constraint(F22, kp2, kp2_prev, d2, d2_prev, match22, .8, 2, .5);
-        } else {
-            // yakk!
-            Matches tmp;
-            for(int j=0; j<match22.size(); ++j)
-            {
-                bool outlier=false;
-                for(int i=0; i<outliers.size(); ++i)
-                {
-                    if (j==outliers[i])
-                    {
-                        outlier = true;
-                        break;
-                    }
-                }
-                if (!outlier)
-                    tmp.push_back(match22[j]);
-            }
-            match22 = tmp;
-        }
-        show2(im2, im2_prev, kp2, kp2_prev, match22, "Right view match: current vs prev (2nd best + epip constraint)", 
-              (boost::format("right_match_%03d.jpg") % iter_num).str().c_str(), 15);
-        //show2(im2, im2_prev, kp2, kp2_prev, match22, "Right view match: current vs prev (2nd best + epip constraint)", 15);
-        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching right vs right_prev: %d matches", match11.size());
+        match_epip_constraint(F22, kp2, kp2_prev, d2, d2_prev, match22, .8, 2, .5);
+        save2(im2, im2_prev, kp2, kp2_prev, match22,
+              (boost::format("rr_%s.jpg")%iter_num).str().c_str(), 15);
+        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
         assert(F22.type()==6);
         //cout << "F22:" << _str<double>(F22) << "; mean algebric error=" << algebricDistance(F22, p2, p2_prev) << endl;
         // matches of 3d points
@@ -835,10 +887,11 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
             eigX_p(1,i) = X_prev.at<float>(1,ind2);
             eigX_p(2,i) = X_prev.at<float>(2,ind2);
         }
-        show4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match, "Circular Match",
+        save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
               (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
         BOOST_LOG_TRIVIAL(info) << match_pcl.size() << " points in circular match";
-        if (match_pcl.size()>3) 
+        BOOST_LOG_TRIVIAL(info) << "solving rigid motion" << endl;
+        if (match_pcl.size()>=3) 
         {
             //number of tries; number of points needed to estimate a model (rotation,translation matrix)
             int N=10, model_pts_num = 3, ninliers=0;
@@ -866,8 +919,10 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
                 solveRigidMotion(X1, X2, T);
                 double sample_rms, inlier_rms, t=.2;
                 inliers.clear();
-                for(int i=0; i<3 || inliers.size()<3; ++i, t*=2)
+                for(int i=0; i<3 && inliers.size()<3; ++i, t*=2)
+                {
                     getRMS(eigX, eigX_p, T, inliers, err, rms, inlier_rms, t /*thresh*/);
+                }
                 if (ninliers<inliers.size())
                 {
                     ninliers = inliers.size();
@@ -876,15 +931,14 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
                 }
             }
             poses.push_back(T_best);
-            show4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match_best, "Circular Match",
-                  (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
             show2Projections(im1, eigX, h2e(T_best.matrix()*e2h(eigX_p)), eP1,
                              (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
         } else {
             // need something else
             cout << "ERROR: not enough matches in circular match" << endl;
-            continue;
+            break;
         }
     }
+    BOOST_LOG_TRIVIAL(debug) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;
 }

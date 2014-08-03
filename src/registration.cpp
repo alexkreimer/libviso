@@ -29,7 +29,7 @@ int main(int argc, char** argv)
     Matches match;
     match_l2_2nd_best(d1, d2, match);
     BOOST_LOG_TRIVIAL(debug) << "done with 2nd best match";
-    show2(im1, im2, kp1, kp2, match, "kuku", "match.jpg");
+    save2(im1, im2, kp1, kp2, match, "match.jpg");
     Points2f p1, p2;
     collect_matches(kp1, kp2, match, p1, p2);
     // p2'Fp1 = 0
