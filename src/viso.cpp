@@ -6,6 +6,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <opencv2/core/eigen.hpp>
+#include <opencv2/flann/flann.hpp>
 #include <map>
 #include <stdexcept>
 #include <vector>
@@ -29,6 +30,7 @@
 
 using namespace std;
 using namespace boost;
+using namespace cvflann;
 
 using cv::Vec3i;
 using cv::Vec4i;
@@ -42,12 +44,13 @@ class Odometer
 };
 
 void
-radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius=10.0f);
+radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius);
 
+// each keypoint (x,y) is a raw in the resut matrix
 Mat
 kp2mat(const KeyPoints& kp)
 {
-    Mat mat(kp.size(), 2, DataType<float>::type, Scalar(0));
+    Mat mat(kp.size(), 2, DataType<float>::type);
     for(int i=0; i<kp.size(); ++i)
     {
         mat.at<float>(i,0) = kp.at(i).pt.x;
@@ -100,7 +103,6 @@ save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_M
     drawPoints(im_rgb, kp, lim, color, thickness, linetype);
     cv::imwrite(file_name, im_rgb);
 }
-
 
 Eigen::MatrixXf
 projectPoints(const MatrixXf& X, const MatrixXf P)
@@ -271,6 +273,31 @@ save2(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
             p2 = kp2[match.at(i)[1]].pt;
         p2.y += im1.rows;
         line(im, p1, p2, Scalar(255));
+    }
+    imwrite(file_name, im);
+}
+
+void
+save2epip(const cv::Mat& im1, const cv::Mat& im2, const Mat& F,
+          Point2f pt, const KeyPoints& kp2, const string& file_name)
+{
+    cv::Mat im_t = vcat<uchar>(im2, im1), im;
+    cvtColor(im_t, im, CV_GRAY2RGB);
+    circle(im, Point(pt.x, pt.y+im2.rows), 3, Scalar(0,0,255), -1);
+    for (int i=0; i<kp2.size(); ++i)
+        circle(im, kp2.at(i).pt, 3, Scalar(255,0,0), -1);
+    // draw the left points corresponding epipolar lines in right image 
+    std::vector<cv::Vec3f> lines;
+    vector<Point2f> pts;
+    pts.push_back(pt);
+    cv::computeCorrespondEpilines(pts, 1, F, lines);
+    //for all epipolar lines
+    for (vector<cv::Vec3f>::const_iterator it=lines.begin(); it!=lines.end(); ++it)
+    {
+        // draw the epipolar line between first and last column
+        cv::line(im,cv::Point(0,-(*it)[2]/(*it)[1]),
+                 cv::Point(im2.cols,-((*it)[2]+(*it)[0]*im2.cols)/(*it)[1]),
+                 cv::Scalar(255,255,255));
     }
     imwrite(file_name, im);
 }
@@ -450,38 +477,110 @@ match_epip_constraint(const cv::Mat& F, const KeyPoints& kp1,
 void
 radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius)
 {
-    Mat dist(1, neighbors.cols, CV_32FC1);
+    assert(points.type()==DataType<float>::type);
+    assert(neighbors.type()==DataType<int>::type);
     for(int i=0; i<points.rows; i++)
     {
-        Mat p(1, points.cols, CV_32FC1, points.ptr<float>(i)),
+        Mat p(1, points.cols, DataType<float>::type, points.ptr<float>(i)),
             n(1, neighbors.cols, CV_32SC1, neighbors.ptr<int>(i));
-        int found=index.radiusSearch(p, n, dist, radius, neighbors.cols, cv::flann::SearchParams());
-//        cout << "found=" << found << endl;
-//        cout << "neighbors:" << _str<int>(neighbors.row(i)) << endl;
+        Mat dist(1, neighbors.cols, DataType<float>::type);
+        // neighbors is assumed to be inited to some invalid index value (e.g., -1)
+        // so later on we can figure out how many neighbors were actually found
+        int found = index.radiusSearch(p, n, dist, radius, neighbors.cols, cv::flann::SearchParams());
+        cout << "found="<<found << ";" << "dist=" << _str<float>(dist) << endl;
+        cout << "n=" << _str<int>(n) << endl;
+        cout << "neighbors.ptr<int>(i)=" << _str<int>(neighbors.row(i)) << endl;
+        cout << "p=" << _str<float>(p);
     }
+}
+
+void
+radiusSearch2(cv::flann::Index& index, Mat& query, Mat& points2, Mat& neighbors, float radius)
+{
+    assert(query.type()==DataType<float>::type);
+    assert(neighbors.type()==DataType<int>::type);
+    int MAX_NEIGHBORS=neighbors.cols;
+    for(int i=0; i<query.rows; i++)
+    {
+        Mat p(1, query.cols, DataType<float>::type, query.ptr<float>(i)),
+            n(1, MAX_NEIGHBORS, DataType<float>::type, neighbors.ptr<int>(i)),
+            dist(1, MAX_NEIGHBORS, DataType<double>::type);
+        // neighbors is assumed to be inited to some invalid index value (e.g., -1)
+        // so later on we can figure out how many neighbors were actually found
+        int found = index.radiusSearch(p, n, dist, radius, MAX_NEIGHBORS, cv::flann::SearchParams());
+        if (!found)
+            continue;
+        cout << "i=" << i << ";found="<<found << ";" << "dist=" << _str<float>(dist) << endl;
+        cout << "n=" << _str<int>(n) << endl;
+        cout << "neighbors.ptr<int>(i)=" << _str<int>(neighbors.row(i)) << endl;
+        cout << "p=" << _str<float>(p);
+        cout << "matches=";
+        for(int j=0; j<found; ++j)
+        {
+            cout << "(ind=" << neighbors.at<int>(i,j) << ",";
+            cout << _str<float>(points2.row(neighbors.at<int>(i,j))) << "), ";
+        }
+        cout << endl;
+    }
+}
+
+void
+radiusSearch3(Index<L2<float>>& index, Mat& query, Mat& points2, Mat& neighbors, float radius)
+{
+    assert(query.type()==DataType<float>::type);
+    assert(neighbors.type()==DataType<int>::type);
+    int MAX_NEIGHBORS=neighbors.cols;
+    // construct an randomized kd-tree index using 4 kd-trees
+    Matrix<float> dists(new float[neighbors.cols], 1, neighbors.cols); // dists
+    for(int i=0; i<query.rows; i++)
+    {
+        Matrix<float> q(query.ptr<float>(i), 1, query.cols);  //query point
+        Matrix<int> indices((int*)neighbors.ptr<int>(i), 1, neighbors.cols);  // neighbor indices
+        int found = index.radiusSearch(q, indices, dists, radius, SearchParams(128));
+        if (!found)
+            continue;
+        cout << "query point " << i << "; found=" << found << " neighbors;" << endl;
+        cout << "neighbors.ptr<int>(i)=" << _str<int>(neighbors.row(i)) << endl;
+        cout << "query point " << _str<float>(query.row(i));
+        cout << "; matches=";
+        for(int j=0; j<found && j<MAX_NEIGHBORS; ++j)
+        {
+            int ind = neighbors.at<int>(i,j);
+            if (ind<0) break;
+            cout << "(match index=" << ind << "," << "match distance=" << ((float *)dists.data)[j] << ",";
+            cout << _str<float>(points2.row(ind)) << "), ";
+        }
+        cout << endl;
+    }
+    delete [] dists.data;
 }
 
 /* p2Fp1=0 */
 void
-match_epip_constraint_flann(const Mat& im1, const Mat& im2, const cv::Mat& F, const KeyPoints& kp1, 
-                            const KeyPoints& kp2, const Descriptors& d1,
-                            const Descriptors& d2, Matches &match,
-                            double ratio, double samp_thresh, double alg_thresh)
+match_epip_constraint_flann(const Mat& im1, const Mat& im2, const cv::Mat& F,
+                            const KeyPoints& kp1, const KeyPoints& kp2,
+                            const Descriptors& d1, const Descriptors& d2, 
+                            Matches &match, double ratio, double samp_thresh,
+                            double alg_thresh, int MAX_NEIGHBORS=100)
 {
-    // store (x,y) of the keypoints in the Mat arrays
-    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
     // create kd-tree of kp2 locations
-    cv::flann::Index tree(mat_kp2, cv::flann::KDTreeIndexParams(16));
-//    cv::flann::Index linear(mat_kp2, cv::flann::LinearIndexParams());
-    int MAX_NEIGHBORS=50;
-    Mat neighbors(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
-    //      neighbors1(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
+    //cv::flann::Index tree(kp2mat(kp2), cv::flann::KDTreeIndexParams(16));
+    //cv::flann::Index linear(kp2mat(kp2), cv::flann::LinearIndexParams());
+    Mat neighbors(kp1.size(), MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
     // search for neighbors. upon return neighbors.row(i) contains 
     // indices into kp2 of nearest neighbor points
-    radiusSearch(tree, mat_kp1, neighbors, 300.0f);
-//    radiusSearch(linear, mat_kp1, neighbors1, 300.0f);
-
+    //radiusSearch(tree, mat_kp1, neighbors, 500.0f);
+    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
+    double radius = 50*50;
+    //radiusSearch2(linear, mat_kp1, mat_kp2, neighbors, radius);
     match.clear();
+    Matrix<float> dataset((float *)mat_kp2.data, (size_t)kp2.size(), (size_t)2), query((float*)mat_kp1.data, (size_t)kp1.size(), (size_t)2);
+    // construct an randomized kd-tree index using 4 kd-trees
+    //Index<L2<float> > index(dataset, KDTreeIndexParams(4));
+    Index<L2<float> > index(dataset, LinearIndexParams());
+    index.buildIndex();
+    assert(index.size() == mat_kp2.rows);
+    radiusSearch3(index, mat_kp1, mat_kp2, neighbors, radius);
     for(int i=0; i<kp1.size(); ++i)
     {
 //        cout << "neighbors.row(i)=" << neighbors.row(i) << endl;
@@ -489,41 +588,30 @@ match_epip_constraint_flann(const Mat& im1, const Mat& im2, const cv::Mat& F, co
         double best_d1 = DBL_MAX, best_d2 = DBL_MAX;
         pair<double,double> best_e;
         int best_idx = -1;
-        int nn=0;
         KeyPoints tmp2;
-        for(int j=0; j<MAX_NEIGHBORS; ++j,++nn)
+        for(int j=0; j<MAX_NEIGHBORS; ++j)
         {
-            int cur_neighbor = neighbors.at<int>(i,j);
-            if (cur_neighbor<0)
-                break;
-            Point2f p2 = kp2.at(cur_neighbor).pt;
-            tmp2.push_back(kp2.at(cur_neighbor));
+            int cur_neighbor_idx = neighbors.at<int>(i,j);
+            if (cur_neighbor_idx<0) break; // no more neighbors
+            Point2f p2 = kp2.at(cur_neighbor_idx).pt;
+            tmp2.push_back(kp2.at(cur_neighbor_idx));
             pair<double,double> e = make_pair(sampsonDistance(F, p1, p2), samp_thresh);
             if (!std::isfinite(e.first))
                 e = make_pair(algebricDistance(F, p1, p2), alg_thresh);
             if (best_e.first > best_e.second)
                 continue;
-            double d = cv::norm(d2.row(cur_neighbor)-d1.row(i), cv::NORM_L1);
+            double d = cv::norm(d2.row(cur_neighbor_idx)-d1.row(i), cv::NORM_L1);
             if (d <= best_d1)
             {
                 best_d2 = best_d1;
                 best_d1 = d;
-                best_idx = cur_neighbor;
+                best_idx = cur_neighbor_idx;
                 best_e = e;
             } else if (d <= best_d2)
                 best_d2 = d;
         }
-#if 0
-        if (nn>0)
-        {
-            KeyPoints tmp1;
-            tmp1.push_back(kp1[i]);
-            save1(im1, tmp1, (boost::format("left_tmp_%03d.jpg")%i).str().c_str());
-            save1(im2, tmp2, (boost::format("right_tmp_%03d.jpg")%i).str().c_str());
-        }
-#endif
-//        if (nn>0)
-//            cout << "i=" << i << "nn="<< nn << endl;
+        if (tmp2.size()>0)
+            save2epip(im1, im2, F, p1, tmp2, (boost::format("epip_match_%03d.jpg")%i).str().c_str());
         // Lowe's 2nd best
         if (best_idx >= 0 /*&& best_d1 < best_d2*ratio*/)
         {
@@ -812,10 +900,10 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 	extractor.compute(im2, kp2, d2);
         save1(im1, kp1, (boost::format("left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
         save1(im2, kp2, (boost::format("right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
-        match_epip_constraint_flann(im1, im2, F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 2 /*sampson distance*/, .5 /*algebric error*/);
-        //localMatch(kp1, kp2, d1, d2, match, 20);
-	BOOST_LOG_TRIVIAL(info) << match.size() << " matches passed epipolar constraint";
-        save2(im1, im2, kp1, kp2, match, (boost::format("match_%03d.jpg") % iter_num).str().c_str(), 10);
+        match_epip_constraint_flann(im1, im2, F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 1 /*sampson distance*/, .5 /*algebric error*/);
+        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs right: %d matches", match.size());
+        save2(im1, im2, kp1, kp2, match, (boost::format("lr_%03d.jpg") % iter_num).str().c_str());
+        exit(1);
 	cv::Mat x1(2, match.size(), CV_32FC1), x2(2, match.size(), CV_32FC1);
 	for(int i=0; i<match.size(); i++)
 	{

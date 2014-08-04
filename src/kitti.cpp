@@ -96,18 +96,24 @@ int main(int argc, char** argv)
         assert(loadCalib(calib_file_name, P1, P2));
         StereoImageGenerator images(StereoImageGenerator::string_pair(
                                         (seq_base / seq_name / "image_0" / "%06d.png").string(),
-                                        (seq_base / seq_name / "image_1" / "%06d.png").string()),0, 70);
+                                        (seq_base / seq_name / "image_1" / "%06d.png").string()), 0, 1);
         vector<Affine3f> poses = sequenceOdometry(P1, P2, images);
         vector<Affine3f> kitti_poses;
         Affine3f Tk = Affine3f::Identity();
+        int i=0;
         for(auto &T: poses)
         {
-            kitti_poses.push_back(Tk.inverse());
+            if (Tk.inverse().matrix().allFinite())
+                kitti_poses.push_back(Tk.inverse());
+            else {
+                BOOST_LOG_TRIVIAL(info) << "estimation failed" << endl;
+                kitti_poses.push_back(Affine3f::Identity());
+            }
             Tk = T*Tk;
         }
         string poses_file_name((result_dir / (seq_name + ".txt")).string());
+        BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
         savePoses(poses_file_name, kitti_poses);
-        BOOST_LOG_TRIVIAL(info) << "Saved poses to " << poses_file_name;
     }
     return 0;
 }
