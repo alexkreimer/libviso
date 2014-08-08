@@ -3,11 +3,16 @@
 
 #include <iostream>
 #include <iomanip>
+#include <cmath>  /* for std::abs(double) */
 #include <opencv2/core/core.hpp>
+#include <stdexcept>
 
 using std::string;
 using cv::Mat;
 using std::stringstream;
+
+bool isEqual(double x, double y);
+bool isEqual(float x, float y);
 
 template<typename T>
 string _str(const Mat& m, bool include_dims=true, int truncate=16,
@@ -85,22 +90,20 @@ Mat hcat(const Mat& m1, const Mat& m2)
 template<class T>
 Mat e2h(const Mat& X)
 {
-    Mat Xh(X.rows+1, X.cols, X.type());
+    Mat Xh(X.rows+1, X.cols, cv::DataType<T>::type);
 
-    for(int i=0; i<Xh.rows; ++i)
+    for(int i=0; i<X.rows; ++i)
     {
-        for(int j=0; j<Xh.cols; ++j)
+        for(int j=0; j<X.cols; ++j)
         {
             Xh.at<T>(i,j) = X.at<T>(i,j);
         }
     }
-
-    for(int i=X.rows, j=0; j<X.cols; ++j)
+    for(int j=0; j<X.cols; ++j)
     {
-        Xh.at<T>(i,j) = 1.0;
+        Xh.at<T>(Xh.rows-1,j) = 1.0;
     }
     return Xh;
-
 }
 
 template<class T>
@@ -112,10 +115,9 @@ Mat h2e(const Mat& X)
     {
         for(int j=0; j<Xh.cols; ++j)
         {
-            if (abs(X.at<T>(X.rows-1,j))>0)
-                Xh.at<T>(i,j) = X.at<T>(i,j)/X.at<T>(X.rows-1,j);
-            else
-                std::cout << "divide by zero in h2d" << std::endl;
+            if (isEqual(abs(X.at<T>(X.rows-1,j)),.0f))
+                throw std::overflow_error("divide by zero in h2e");
+            Xh.at<T>(i,j) = X.at<T>(i,j)/X.at<T>(X.rows-1,j);
         }
     }
     return Xh;

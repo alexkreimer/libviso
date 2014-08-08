@@ -12,13 +12,7 @@ find_package(Boost COMPONENTS log log_setup system filesystem thread REQUIRED)
 include_directories(${Boost_INCLUDE_DIR})
 link_directories(${Boost_LIBRARY_DIR})
 
-add_library(viso viso.cpp mvg.cpp estimation.cpp)
+add_library(viso viso.cpp mvg.cpp estimation.cpp misc.cpp)
 
 add_executable(kitti kitti.cpp)
-target_link_libraries(kitti viso ${OpenCV_LIBS} ${Boost_LIBRARIES}) 
-
-add_executable(registration registration.cpp)
-target_link_libraries(registration viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
-
-add_executable(mod3d mod3d.cpp)
-target_link_libraries(mod3d viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
+target_link_libraries(kitti viso ${OpenCV_LIBS} ${Boost_LIBRARIES})

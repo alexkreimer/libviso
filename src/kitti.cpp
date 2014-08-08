@@ -83,7 +83,7 @@ int main(int argc, char** argv)
     char *result_sha = argv[1], *KITTI_HOME  = std::getenv("KITTI_HOME");
     assert(KITTI_HOME);
     fs::path
-        result_dir = fs::path(KITTI_HOME) / "results" / result_sha,
+        result_dir = fs::path(KITTI_HOME) / "results" / result_sha / "data",
         seq_base = fs::path(KITTI_HOME) / "sequences";
     vector<string> seq_names = {"00"};
     for(auto &seq_name: seq_names)
@@ -96,7 +96,7 @@ int main(int argc, char** argv)
         assert(loadCalib(calib_file_name, P1, P2));
         StereoImageGenerator images(StereoImageGenerator::string_pair(
                                         (seq_base / seq_name / "image_0" / "%06d.png").string(),
-                                        (seq_base / seq_name / "image_1" / "%06d.png").string()), 0, 1);
+                                        (seq_base / seq_name / "image_1" / "%06d.png").string()), 0, 4540);
         vector<Affine3f> poses = sequenceOdometry(P1, P2, images);
         vector<Affine3f> kitti_poses;
         Affine3f Tk = Affine3f::Identity();

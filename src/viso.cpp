@@ -30,7 +30,6 @@
 
 using namespace std;
 using namespace boost;
-using namespace cvflann;
 
 using cv::Vec3i;
 using cv::Vec4i;
@@ -43,8 +42,143 @@ class Odometer
     const cv::DescriptorExtractor &descriptor;
 };
 
+struct MatchParams
+{
+    bool enforce_epipolar;
+    Mat F;
+    double alg_thresh;
+    double sampson_thresh;
+
+    bool enforce_2nd_best;
+    double ratio_2nd_best;
+
+    bool allow_ann;
+    int max_neighbors;
+    double radius;
+
+    MatchParams(Mat F) : enforce_epipolar(true),
+                         sampson_thresh(1),
+                         enforce_2nd_best(false),
+                         ratio_2nd_best(.8),
+                         allow_ann(true),
+                         max_neighbors(200),
+                         radius(80)
+        {
+            F.copyTo(this->F);
+        };
+    MatchParams() : enforce_epipolar(false), enforce_2nd_best(true),
+                    ratio_2nd_best(.9), allow_ann(true), max_neighbors(250),
+                    radius(80) {}
+};
+
+MatrixXf
+get_inl(const MatrixXf& X, const vector<int>& inl)
+{
+    assert(inl.size()>0 && inl.size()<X.cols());
+    MatrixXf Xinl(X.rows(), inl.size());
+    int j=0;
+    for(auto i: inl)
+    {
+        Xinl.col(j++) = X.col(i);
+    }
+    return Xinl;
+}
 void
-radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius);
+knnSearch(cv::flann::Index& index, Mat& query_points, Mat& neighbors, Mat& p2)
+{
+    assert(query_points.type()==DataType<float>::type);
+    assert(neighbors.type()==DataType<int>::type);
+    cout << "doing knnSearch, nn=" << neighbors.cols << endl;
+    for(int i=0; i<query_points.rows; i++)
+    {
+        Mat query(1, query_points.cols, DataType<float>::type, query_points.ptr<float>(i)),
+            neigh(1, neighbors.cols, CV_32SC1, neighbors.ptr<int>(i)),
+            dists(1, neighbors.cols, DataType<float>::type);
+        /*int found = */index.knnSearch(query, neigh, dists, neighbors.cols, cv::flann::SearchParams(128));
+        for(int j=0; j<neighbors.cols; ++j)
+        {
+            int ind = neighbors.at<float>(i,j);
+            if (ind<0) break;
+            Mat pt2 = p2.row(ind);
+            double dist = cv::norm(query-pt2);
+            cout << "radius violation: p1=" << _str<float>(query) << "; p2=" << _str<float>(pt2) << "; dist=" << dist << "dist1=" << dists.at<float>(j) << endl;
+        }
+        cout << endl;
+    }
+}
+void
+radiusSearch(cvflann::Index<cvflann::L1<float>>& index, Mat& query_points, 
+             Mat& neighbors, float radius, Mat& p2, bool dbg=1)
+{
+    assert(query_points.type()==DataType<float>::type);
+    assert(neighbors.type()==DataType<int>::type);
+    cvflann::Matrix<float> dists(new float[neighbors.cols], 1, neighbors.cols);
+    for(int i=0; i<query_points.rows; i++)
+    {
+        cvflann::Matrix<float> query(query_points.ptr<float>(i), 1, query_points.cols);
+        cvflann::Matrix<int> nei(neighbors.ptr<int>(i), 1, neighbors.cols);
+        int found = index.radiusSearch(query, nei, dists, radius, nei.cols);
+        for(int j=found; j<nei.cols; ++j)
+        {
+            nei.data[j] = -1;
+            dists.data[j] = -1;
+        }
+#if 0
+        Mat q(1, query_points.cols, DataType<float>::type, query.data),
+            d(1, neighbors.cols, DataType<float>::type, dists.data);
+        if (dbg)
+            cout << "found=" << found << "; q=" << q << "; d=" << d << endl;
+        for (int j=0; dbg && j<found && j<neighbors.cols; ++j)
+        {
+            cout << "nei=" << nei.data[j] << "; pt=[" << p2.at<float>(nei.data[j],0) <<"," << p2.at<float>(nei.data[j],1) << "]" 
+                 << abs(query.data[0]-p2.at<float>(nei.data[j],0))+ abs(query.data[1]-p2.at<float>(nei.data[j],1)) << endl;
+            if (abs(query.data[0]-22) < 5 && abs(query.data[1]-22)<5)
+            {
+                cout << "kuku";
+            }
+        }
+#endif        
+    }
+}
+
+
+void
+match_circle(const Matches& match_lr, const Matches& match_lr_prev,
+             const Matches& match11, const Matches& match22,
+             vector<Vec4i>& circ_match, Matches& match_pcl)
+{
+    // iterate over left features that have a match
+    for(int i=0; i<match_lr.size(); ++i)
+    {
+        int ileft = match_lr.at(i)[0], iright = match_lr.at(i)[1];
+        // go over all matches to left prev
+        for(int j=0; j<match11.size(); ++j)
+        {
+            if (match11.at(j)[0] == ileft)
+            {
+                int ileft_prev = match11.at(j)[1];
+                for(int k=0; k<match_lr_prev.size(); ++k)
+                {
+                    if (match_lr_prev.at(k)[0] == ileft_prev)
+                    {
+                        int iright_prev = match_lr_prev.at(k)[1];
+                        for(int l=0; l<match22.size(); ++l)
+                        {
+                            if (match22.at(l)[1] == iright_prev)
+                            {
+                                if (match22.at(l)[0] == iright)
+                                {
+                                    circ_match.push_back(Vec4i(ileft, iright, ileft_prev, iright_prev));
+                                    match_pcl.push_back(Match(i,k));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // each keypoint (x,y) is a raw in the resut matrix
 Mat
@@ -60,20 +194,29 @@ kp2mat(const KeyPoints& kp)
 }
 
 /* eucledian to homogenious */
-MatrixXf e2h(const MatrixXf &xe)
+MatrixXf
+e2h(const MatrixXf &xe)
 {
     MatrixXf xh(xe.rows()+1, xe.cols());
-    xh << xe, Eigen::MatrixXf::Constant(1, xe.cols(), 1.0);
+    //xh << xe, Eigen::MatrixXf::Constant(1, xe.cols(), 1.0);
+    for(int i=0; i<xe.rows(); ++i)
+        for(int j=0; j<xe.cols(); ++j)
+            xh(i,j) = xe(i,j);
+
+    for(int j=0; j<xe.cols(); ++j)
+        xh(xe.rows(),j) = 1.0;
+
     return xh;
 }
 
-MatrixXf h2e(const MatrixXf &xh)
+MatrixXf
+h2e(const MatrixXf &xh)
 {
     MatrixXf xe(xh.rows()-1, xh.cols());
     for(int i=0; i<xh.cols(); ++i)
     {
         if (abs(xh(xh.rows()-1,i)) < DBL_MIN)
-            BOOST_LOG_TRIVIAL(error) << "h2e: divide by zero";
+            throw std::overflow_error("divide by zero in h2e");
         xe.col(i) = xh.col(i).topRows(xh.rows()-1)/xh(xh.rows()-1,i);
     }
     return xe;
@@ -87,6 +230,14 @@ drawPoints(Mat& im, const MatrixXf& x, const Scalar& color, int thickness, int l
 }
 
 void
+drawPoints(Mat& im, const Mat& x, const Scalar& color, int thickness, int linetype)
+{
+    assert(x.type() == DataType<float>::type);
+    for(int i=0; i<x.cols; ++i)
+        circle(im, cv::Point(x.at<float>(0,i), x.at<float>(1,i)), thickness, color, linetype);
+}
+
+void
 drawPoints(Mat& im, const KeyPoints& kp, int lim, const Scalar& color,
            int thickness, int linetype)
 {
@@ -96,7 +247,7 @@ drawPoints(Mat& im, const KeyPoints& kp, int lim, const Scalar& color,
 
 void
 save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_MAX,
-      Scalar color=Scalar(255,0,0), int thickness=2, int linetype=-11)
+      Scalar color=Scalar(255,0,0), int thickness=1, int linetype=-1)
 {
     Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
@@ -107,7 +258,17 @@ save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_M
 Eigen::MatrixXf
 projectPoints(const MatrixXf& X, const MatrixXf P)
 {
-    return h2e(P*e2h(X));
+    MatrixXf t = h2e(P*e2h(X));
+    cout << "t.data()=" << t.data() << endl;
+}
+
+Mat
+projectPoints(const Mat& X, const Mat& P)
+{
+    assert(X.type()==DataType<float>::type);
+    Mat Xh = e2h<float>(X), Pf;
+    P.convertTo(Pf, DataType<float>::type);
+    return h2e<float>(Pf*Xh);
 }
 
 void
@@ -126,19 +287,37 @@ showProjection(const Mat &im, const MatrixXf& x, const MatrixXf& X, const Matrix
 }
 
 void
-show2Projections(const Mat &im, const MatrixXf& X1, const MatrixXf& X2, const MatrixXf& P,
-                 const string& file_name)
+save2reproj(const Mat &im, const MatrixXf& X1, const MatrixXf& X2,
+            const MatrixXf& P, const string& file_name)
 {
     Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
-    Scalar CYAN = Scalar(255, 255,0), GREEN = Scalar(0, 255, 0);
-    drawPoints(im_rgb, projectPoints(X1,P), CYAN, 3, -1);
-    drawPoints(im_rgb, projectPoints(X2,P), GREEN, 5, 1);
-    string title("cyan are X1, green are X2");
-    //cv::namedWindow(title);
-    //imshow(title, im_rgb);
-    //waitKey(0);
-    //cv::destroyWindow(title);
+    MatrixXf x1 = projectPoints(X1,P), x2 = projectPoints(X2,P);
+    cout << "x1.data()=" << x1.data() << endl;
+    cout << "x2.data()=" << x2.data() << endl;
+    drawPoints(im_rgb, x1, Scalar(0,0,255), 2, -1);
+    drawPoints(im_rgb, x2, Scalar(0,255,0), 3, 1);
+    imwrite(file_name, im_rgb);
+}
+
+void
+save2reproj(const Mat &im, const MatrixXf& X1, const MatrixXf& X2,
+            const MatrixXf& P1, const MatrixXf& P2, const string& file_name)
+{
+    Mat im_rgb;
+    cvtColor(im, im_rgb, CV_GRAY2RGB);
+    drawPoints(im_rgb, projectPoints(X1,P1), Scalar(0,0,255), 3, 1);
+    drawPoints(im_rgb, projectPoints(X2,P2), Scalar(0,255,0), 3, 1);
+    imwrite(file_name, im_rgb);
+}
+
+bool
+save1reproj(const Mat& im, const Mat& X,const Mat& x, const Mat& P, const string& file_name)
+{
+    cv::Mat im_rgb;
+    cvtColor(im, im_rgb, CV_GRAY2RGB);
+    drawPoints(im_rgb, x, Scalar(255,0,0), 1, -1);
+    drawPoints(im_rgb, projectPoints(X,P), Scalar(0,255,0), 3, 1);
     imwrite(file_name, im_rgb);
 }
 
@@ -189,35 +368,27 @@ randomsample(int k, int n)
 }
 
 // T*X2 = X1
-void
+double
 getRMS(const MatrixXf& X1, const MatrixXf& X2, const Affine3f& T,
-       vector<int>& inliers, vector<float>& err, double& rms,
-       double& inlier_rms, double thresh)
+       vector<int>& inliers, double thresh)
 {
-    assert(X1.rows()==3);
-    assert(X2.rows()==3);
+    assert(X1.rows()==3 && X2.rows()==3);
     assert(X1.cols()==X2.cols());
-    MatrixXf X1h = e2h(X1), X2h = e2h(X2);
-    MatrixXf X2h_rot = T.matrix()*X2h;
-    MatrixXf delta = h2e(X1h)-h2e(X2h_rot);
-    MatrixXf sq_err = delta.colwise().squaredNorm();
+
+    MatrixXf er = X1-h2e(T.matrix()*e2h(X2));
+    MatrixXf er_sq = er.colwise().squaredNorm();
     inliers.clear();
-    err.clear();
-    for(int i=0; i<sq_err.cols(); ++i)
+    double rms=0;
+    for(int i=0; i<er_sq.cols(); ++i)
     {
-        if (sq_err(i)<thresh*thresh)
+        if (er_sq(i)<thresh*thresh)
         {
             inliers.push_back(i);
-            err.push_back(sqrt(sq_err(i)));
+            rms += er_sq(i);
         }
     }
-    inlier_rms=0;
-    for(auto &e: err)
-    {
-        inlier_rms += e*e;
-    }
-    inlier_rms = sqrt(inlier_rms/err.size());
-    rms = sqrt((sq_err.array()/sq_err.cols()).sum());
+    rms /= inliers.size();
+    return sqrt(rms);
 }
 
 
@@ -245,6 +416,20 @@ collect_matches(const KeyPoints& kp1, const KeyPoints &kp2,
     }
 }
 
+void
+collect_matches(const KeyPoints& kp1, const KeyPoints &kp2,
+                const Matches &match, Mat &p1, Mat &p2)
+{
+    for(int i=0; i<match.size(); ++i)
+    {
+        int i1 = match.at(i)[0], i2 = match.at(i)[1];
+        p1.at<float>(0,i) = kp1.at(i1).pt.x;
+        p1.at<float>(1,i) = kp1.at(i1).pt.y;
+        p2.at<float>(0,i) = kp2.at(i2).pt.x;
+        p2.at<float>(1,i) = kp2.at(i2).pt.y;
+    }
+}
+
 /* concatenate a pair of matrices vertically
    m1, m2 must have the same number of columns
 */
@@ -255,17 +440,14 @@ save2(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
 {
     cv::Mat im_t = vcat<uchar>(im1, im2), im;
     cvtColor(im_t, im, CV_GRAY2RGB);
-#if 0
     for (int i=0; i<kp1.size(); ++i)
     {
-        circle(im, kp1.at(i).pt, 3, Scalar(255,255,0), -1);
+        circle(im, kp1.at(i).pt, 2, Scalar(255,0,0), -1);
     }
     for (int i=0; i<kp2.size(); ++i)
     {
-        Point center(kp2.at(i).pt.x, kp2.at(i).pt.y+im1.rows);
-        circle(im, center, 3, Scalar(255,250,0), -1);
+        circle(im, Point(kp2.at(i).pt.x, kp2.at(i).pt.y+im1.rows), 2, Scalar(255,0,0), -1);
     }
-#endif
     for(int i=0; i<match.size() && i<lim; ++i)
     {
         Point 
@@ -273,6 +455,33 @@ save2(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
             p2 = kp2[match.at(i)[1]].pt;
         p2.y += im1.rows;
         line(im, p1, p2, Scalar(255));
+    }
+    imwrite(file_name, im);
+}
+
+void
+save2blend(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
+           const KeyPoints& kp2, const Matches &match, const string& file_name,
+           int lim=INT_MAX)
+{
+    cv::Mat blend, im;
+    addWeighted(im1, .5, im2, .5, 0.0, blend);
+    cvtColor(blend, im, CV_GRAY2RGB);
+    for (int i=0; i<kp1.size(); ++i)
+    {
+//        circle(im, kp1.at(i).pt, 2, Scalar(255,0,0), -1);
+    }
+    for (int i=0; i<kp2.size(); ++i)
+    {
+//        circle(im, kp2.at(i).pt, 2, Scalar(0,255,0), -1);
+    }
+    for(int i=0;i<match.size() && i<lim; ++i)
+    {
+        Point 
+            p1 = kp1[match.at(i)[0]].pt,
+            p2 = kp2[match.at(i)[1]].pt;
+        circle(im, p1, 1, Scalar(0,255,0), -1);
+        line(im, p1, p2, Scalar(255,0,0));
     }
     imwrite(file_name, im);
 }
@@ -346,151 +555,111 @@ sampsonDistance(const Mat& F,const Point2f& p1,const Point2f &p2)
 {
     assert(F.type() == cv::DataType<double>::type);
     double 
-        f0s = F.at<double>(0,0)*F.at<double>(0,0), 
-        f1s = F.at<double>(1,0)*F.at<double>(1,0),
-        f3s = F.at<double>(0,1)*F.at<double>(0,1);
-    float x1s = p1.x*p1.x, y1s = p1.y*p1.y, x2s = p2.x*p2.x, y2s = p2.y*p2.y;
-    return algebricDistance(F, p1, p2)/(f0s*x1s+f1s*y1s+f0s*x2s+f3s*y2s);
-}
-// match descriptors d1 vs. d2 using L2 distance
-// and David Lowe 2nd best
-void
-match_l2_2nd_best_flann(const KeyPoints& kp1, const KeyPoints& kp2,
-                        const cv::Mat& d1, const cv::Mat& d2,
-                        Matches& match, float ratio=.65)
-{
-    // each row of d1 and d2 is a descriptor
-    assert(d1.cols == d2.cols);
-    match.clear();
-    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
-    // create kd-tree of kp2 locations
-    cv::flann::Index tree(mat_kp2, cv::flann::KDTreeIndexParams(16));
-    int MAX_NEIGHBORS=50;
-    Mat neighbors(mat_kp1.rows, MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
-    // search for neighbors. upon return neighbors.row(i) contains 
-    // indices into kp2 of nearest neighbor points
-    radiusSearch(tree, mat_kp1, neighbors, 30.0f);
-    for(int i=0; i<kp1.size(); ++i)
-    {
-        float best_d1 = FLT_MAX, best_d2 = FLT_MAX;
-        int best_idx = -1;
-        for(int j=0; j<MAX_NEIGHBORS; ++j)
-        {
-            int cur_neighbor = neighbors.at<int>(i,j);
-            if (cur_neighbor<0)
-                break;
-            double d = cv::norm(d2.row(cur_neighbor)-d1.row(i));
-            if (d <= best_d1)
-            {
-                best_d2 = best_d1;
-                best_d1 = d;
-                best_idx = j;
-            } else if (d <= best_d2) {
-                best_d2 = d;
-            }
-        }
-        // Lowe's 2nd best
-        if (best_idx >= 0 && best_d1<best_d2*ratio)
-        {
-            match.push_back(Match(i, best_idx, best_d1));
-        }
-    }
-    std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
-}
-
-// match descriptors d1 vs. d2 using L2 distance
-// and David Lowe 2nd best
-void
-match_l2_2nd_best(const cv::Mat& d1,
-                  const cv::Mat& d2,
-                  Matches& match,
-                  float ratio)
-{
-    // each row of d1 and d2 is a descriptor
-    assert(d1.cols == d2.cols);
-    match.clear();
-    for(int i=0; i<d1.rows; ++i)
-    {
-        float best_d1 = FLT_MAX, best_d2 = FLT_MAX;
-        int best_idx = -1;
-        for(int j=0; j<d2.rows; ++j)
-        {
-            double d = cv::norm(d2.row(j)-d1.row(i));
-            if (d <= best_d1)
-            {
-                best_d2 = best_d1;
-                best_d1 = d;
-                best_idx = j;
-            } else if (d <= best_d2) {
-                best_d2 = d;
-            }
-        }
-        // Lowe's 2nd best
-        if (best_idx >= 0 && best_d1<best_d2*ratio)
-        {
-            match.push_back(Match(i, best_idx, best_d1));
-        }
-    }
-    std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
+        Fx0 = F.at<double>(0,0)*p1.x + F.at<double>(0,1)*p1.y + F.at<double>(0,2),
+        Fx1 = F.at<double>(1,0)*p1.x + F.at<double>(1,1)*p1.y + F.at<double>(1,2),
+        Ftx0= F.at<double>(0,0)*p2.x + F.at<double>(1,0)*p2.y + F.at<double>(2,0),
+        Ftx1= F.at<double>(0,1)*p2.x + F.at<double>(1,1)*p2.y + F.at<double>(2,1);
+    float ad = algebricDistance(F, p1, p2);
+    return ad*ad/(Fx0*Fx0+Fx1*Fx1+Ftx0*Ftx0+Ftx1*Ftx1);
 }
 
 /* p2Fp1=0 */
 void
-match_epip_constraint(const cv::Mat& F, const KeyPoints& kp1, 
-                      const KeyPoints& kp2, const Descriptors& d1,
-                      const Descriptors& d2, Matches &match,
-                      double ratio, double samp_thresh, double alg_thresh)
+match_desc(const KeyPoints& kp1, const KeyPoints& kp2,
+           const Descriptors& d1, const Descriptors& d2,
+           Matches &match, const MatchParams& sp = MatchParams())
 {
+    const clock_t begin_time = clock();
     match.clear();
+    assert(d1.cols==d2.cols);
+    // cv::flann::Index index = (sp.allow_ann) ? 
+    //     cv::flann::Index(kp2mat(kp2), cv::flann::KDTreeIndexParams(16), ::cvflann::FLANN_DIST_L1) :
+    //     cv::flann::Index(kp2mat(kp2), cv::flann::LinearIndexParams(), ::cvflann::FLANN_DIST_L1);
+    Mat kp1m = kp2mat(kp1), kp2m = kp2mat(kp2), neighbors(kp1m.rows, sp.max_neighbors,
+                                                          DataType<int>::type, Scalar(-1));
+    cvflann::Matrix<float> dataset((float*)kp2m.data, (size_t)kp2m.rows, (size_t)kp2m.cols);
+    //cvflann::Index<cvflann::L1<float>> index(dataset, cvflann::KDTreeIndexParams(16));
+    cvflann::Index<cvflann::L1<float>> index(dataset, cvflann::LinearIndexParams());
+    radiusSearch(index, kp1m, neighbors, sp.radius, kp2m, !sp.enforce_epipolar);
     for(int i=0; i<kp1.size(); ++i)
     {
-        Point2f p1 = kp1[i].pt;
+        Point2f p1 = kp1.at(i).pt;
         double best_d1 = DBL_MAX, best_d2 = DBL_MAX;
         pair<double,double> best_e;
         int best_idx = -1;
-        for(int j=0; j<kp2.size(); ++j)
+        for(int j=0, nind=neighbors.at<int>(i,j);
+            j<neighbors.cols && nind>0; ++j, nind=neighbors.at<int>(i,j))
         {
-            Point2f p2 = kp2[j].pt;
-            pair<double,double> e = make_pair(sampsonDistance(F, p1, p2), samp_thresh);
-            if (!std::isfinite(e.first))
-                e = make_pair(algebricDistance(F, p1, p2), alg_thresh);
-            double d = cv::norm(d2.row(j)-d1.row(i));
+            if (sp.enforce_epipolar)
+            {
+                Point2f p2 = kp2.at(nind).pt;
+                double sampson_dist = sampsonDistance(sp.F, p1, p2);
+                if (!std::isfinite(sampson_dist) || sampson_dist > sp.sampson_thresh)
+                    continue;
+            }
+            double d = cv::norm(d2.row(nind)-d1.row(i), cv::NORM_L1);
             if (d <= best_d1)
             {
                 best_d2 = best_d1;
                 best_d1 = d;
-                best_idx = j;
-                best_e = e;
+                best_idx = nind;
             } else if (d <= best_d2)
                 best_d2 = d;
         }
-        // Lowe's 2nd best
-        if (best_idx >= 0 && best_d1 < best_d2*ratio)
+        if (best_idx >= 0)
         {
-            if (best_e.first < best_e.second)
+            if (sp.enforce_2nd_best)
+            {
+                if (best_d1 < best_d2*sp.ratio_2nd_best)
+                {
+                    match.push_back(Match(i, best_idx, best_d1));
+                }
+            } else {
                 match.push_back(Match(i, best_idx, best_d1));
+            }
         }
     }
     std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
+    BOOST_LOG_TRIVIAL(debug) << "match time [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC;
 }
 
 void
-radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius)
+radiusSearch(cv::flann::Index& index, Mat& points, Mat& neighbors, float radius, Mat& p2)
 {
     assert(points.type()==DataType<float>::type);
     assert(neighbors.type()==DataType<int>::type);
     for(int i=0; i<points.rows; i++)
     {
         Mat p(1, points.cols, DataType<float>::type, points.ptr<float>(i)),
-            n(1, neighbors.cols, CV_32SC1, neighbors.ptr<int>(i));
-        Mat dist(1, neighbors.cols, DataType<float>::type);
-        // neighbors is assumed to be inited to some invalid index value (e.g., -1)
-        // so later on we can figure out how many neighbors were actually found
-        int found = index.radiusSearch(p, n, dist, radius, neighbors.cols, cv::flann::SearchParams());
-        cout << "found="<<found << ";" << "dist=" << _str<float>(dist) << endl;
-        cout << "n=" << _str<int>(n) << endl;
-        cout << "neighbors.ptr<int>(i)=" << _str<int>(neighbors.row(i)) << endl;
-        cout << "p=" << _str<float>(p);
+            n(1, neighbors.cols, CV_32SC1, neighbors.ptr<int>(i)),
+            dist(1, neighbors.cols, DataType<float>::type);
+        int found = index.radiusSearch(p, n, dist, radius, neighbors.cols);
+        cout << "found=" << found << endl;
+        cout << "p=" << p << endl;
+        cout << "n=" << n << endl;
+        cout << "dist=" << dist << endl;
+        for(int j=0; j<neighbors.cols && j<found; ++j)
+        {
+            int ind = n.at<int>(0,j);
+            assert(ind>=0);
+            Mat pt2 = p2.row(ind);
+            double dst = abs(p.at<float>(0,0)-pt2.at<float>(0,0))+abs(p.at<float>(0,1)-pt2.at<float>(0,1));
+            cout << "dst=" << dst << ",";
+            cout << "neighbor=[" << pt2.at<float>(0,0) << "," << pt2.at<float>(0,1) << ";" << endl;
+            if (0 && dst>radius)
+            {
+                cout << "radius violation: query=" << p 
+                     << "; neighbor=" << pt2
+                     << "; L1=" << dst
+                     << "; dist=" << dist.at<float>(0,j) << endl;
+                cout << "j=" << j << endl;
+                cout << "ind=" << ind << endl;
+                cout << "found=" << found << endl;
+                cout << "n=" << n << endl;
+                cout << "dist=" << dist << endl;
+            }
+        }
+        cout << endl;
     }
 }
 
@@ -522,103 +691,6 @@ radiusSearch2(cv::flann::Index& index, Mat& query, Mat& points2, Mat& neighbors,
         }
         cout << endl;
     }
-}
-
-void
-radiusSearch3(Index<L2<float>>& index, Mat& query, Mat& points2, Mat& neighbors, float radius)
-{
-    assert(query.type()==DataType<float>::type);
-    assert(neighbors.type()==DataType<int>::type);
-    int MAX_NEIGHBORS=neighbors.cols;
-    // construct an randomized kd-tree index using 4 kd-trees
-    Matrix<float> dists(new float[neighbors.cols], 1, neighbors.cols); // dists
-    for(int i=0; i<query.rows; i++)
-    {
-        Matrix<float> q(query.ptr<float>(i), 1, query.cols);  //query point
-        Matrix<int> indices((int*)neighbors.ptr<int>(i), 1, neighbors.cols);  // neighbor indices
-        int found = index.radiusSearch(q, indices, dists, radius, SearchParams(128));
-        if (!found)
-            continue;
-        cout << "query point " << i << "; found=" << found << " neighbors;" << endl;
-        cout << "neighbors.ptr<int>(i)=" << _str<int>(neighbors.row(i)) << endl;
-        cout << "query point " << _str<float>(query.row(i));
-        cout << "; matches=";
-        for(int j=0; j<found && j<MAX_NEIGHBORS; ++j)
-        {
-            int ind = neighbors.at<int>(i,j);
-            if (ind<0) break;
-            cout << "(match index=" << ind << "," << "match distance=" << ((float *)dists.data)[j] << ",";
-            cout << _str<float>(points2.row(ind)) << "), ";
-        }
-        cout << endl;
-    }
-    delete [] dists.data;
-}
-
-/* p2Fp1=0 */
-void
-match_epip_constraint_flann(const Mat& im1, const Mat& im2, const cv::Mat& F,
-                            const KeyPoints& kp1, const KeyPoints& kp2,
-                            const Descriptors& d1, const Descriptors& d2, 
-                            Matches &match, double ratio, double samp_thresh,
-                            double alg_thresh, int MAX_NEIGHBORS=100)
-{
-    // create kd-tree of kp2 locations
-    //cv::flann::Index tree(kp2mat(kp2), cv::flann::KDTreeIndexParams(16));
-    //cv::flann::Index linear(kp2mat(kp2), cv::flann::LinearIndexParams());
-    Mat neighbors(kp1.size(), MAX_NEIGHBORS, DataType<int>::type, Scalar(-1));
-    // search for neighbors. upon return neighbors.row(i) contains 
-    // indices into kp2 of nearest neighbor points
-    //radiusSearch(tree, mat_kp1, neighbors, 500.0f);
-    Mat mat_kp1 = kp2mat(kp1), mat_kp2 = kp2mat(kp2);
-    double radius = 50*50;
-    //radiusSearch2(linear, mat_kp1, mat_kp2, neighbors, radius);
-    match.clear();
-    Matrix<float> dataset((float *)mat_kp2.data, (size_t)kp2.size(), (size_t)2), query((float*)mat_kp1.data, (size_t)kp1.size(), (size_t)2);
-    // construct an randomized kd-tree index using 4 kd-trees
-    //Index<L2<float> > index(dataset, KDTreeIndexParams(4));
-    Index<L2<float> > index(dataset, LinearIndexParams());
-    index.buildIndex();
-    assert(index.size() == mat_kp2.rows);
-    radiusSearch3(index, mat_kp1, mat_kp2, neighbors, radius);
-    for(int i=0; i<kp1.size(); ++i)
-    {
-//        cout << "neighbors.row(i)=" << neighbors.row(i) << endl;
-        Point2f p1 = kp1[i].pt;
-        double best_d1 = DBL_MAX, best_d2 = DBL_MAX;
-        pair<double,double> best_e;
-        int best_idx = -1;
-        KeyPoints tmp2;
-        for(int j=0; j<MAX_NEIGHBORS; ++j)
-        {
-            int cur_neighbor_idx = neighbors.at<int>(i,j);
-            if (cur_neighbor_idx<0) break; // no more neighbors
-            Point2f p2 = kp2.at(cur_neighbor_idx).pt;
-            tmp2.push_back(kp2.at(cur_neighbor_idx));
-            pair<double,double> e = make_pair(sampsonDistance(F, p1, p2), samp_thresh);
-            if (!std::isfinite(e.first))
-                e = make_pair(algebricDistance(F, p1, p2), alg_thresh);
-            if (best_e.first > best_e.second)
-                continue;
-            double d = cv::norm(d2.row(cur_neighbor_idx)-d1.row(i), cv::NORM_L1);
-            if (d <= best_d1)
-            {
-                best_d2 = best_d1;
-                best_d1 = d;
-                best_idx = cur_neighbor_idx;
-                best_e = e;
-            } else if (d <= best_d2)
-                best_d2 = d;
-        }
-        if (tmp2.size()>0)
-            save2epip(im1, im2, F, p1, tmp2, (boost::format("epip_match_%03d.jpg")%i).str().c_str());
-        // Lowe's 2nd best
-        if (best_idx >= 0 /*&& best_d1 < best_d2*ratio*/)
-        {
-            match.push_back(Match(i, best_idx, best_d1));
-        }
-    }
-    std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
 }
 
 /*
@@ -744,8 +816,8 @@ class HarrisFeatureDetector : public cv::FeatureDetector
 {
 public:
     // descriptor radius is used only to init KeyPoints
-    HarrisFeatureDetector(int descriptor_radius) 
-        : m_descriptor_radius(descriptor_radius) {}
+    HarrisFeatureDetector(int radius, int max_feat_num)
+        : m_radius(radius), m_max_feat_num(max_feat_num) {}
 
 protected:
     void
@@ -753,24 +825,112 @@ protected:
     {
         Mat dst, dst_norm;
         dst = Mat::zeros(image.size(), DataType<float>::type);
-        int block_size=3, aperture_size=5, thresh=80;
-        double k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
+        int block_size=3, aperture_size=5;
+        double thresh = 80.0, step = 3.0, k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
         cv::cornerHarris(image, dst, block_size, aperture_size, k, cv::BORDER_DEFAULT);
         cv::normalize(dst, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
-        for(int j=0; j<dst_norm.rows ; j++ )
+        int tries;
+        for(tries=0; 
+            tries < 3 && (kp.size() < m_max_feat_num || kp.size() > m_max_feat_num*3);
+            ++tries)
         {
-            for( int i = 0; i<dst_norm.cols; i++ )
+            if (kp.size() > 0)
             {
-                if ((int)dst_norm.at<float>(j,i)>thresh)
+                if (kp.size() < m_max_feat_num)
                 {
-                    kp.push_back(KeyPoint(Point2f(i,j), 2*m_descriptor_radius+1));
+                    thresh -= step;
+                } else {
+                    thresh += step;
+                }
+                kp.clear(); ++tries;
+            }
+            for(int j=0; j<dst_norm.rows ; j++ )
+            {
+                for( int i = 0; i<dst_norm.cols; i++ )
+                {
+                    int response = (int)dst_norm.at<float>(j,i);
+                    if (response>thresh && i>m_radius && j>m_radius &&
+                        i+m_radius<dst_norm.cols && j+m_radius<dst_norm.rows)
+                    {
+                        KeyPoint keypoint;
+                        keypoint.pt = Point2f(i,j);
+                        keypoint.response = response;
+                        keypoint.size = 2*m_radius+1;
+                        kp.push_back(keypoint);
+                    }
                 }
             }
         }
-
+        BOOST_LOG_TRIVIAL(debug) << "found " << kp.size() << " harris corners in " << tries << " iterations";
+        auto leq = [](const KeyPoint &a, const KeyPoint &b) { return true;/*a.response<=b.response;*/};
+        //std::sort(kp.begin(), kp.end(), leq);
+        if (kp.size() > m_max_feat_num)
+            kp.erase(m_max_feat_num+kp.begin(), kp.end());
     }
-private:
-    int m_descriptor_radius;
+    int m_radius, m_max_feat_num;
+};
+
+class HarrisFeatureDetector1 : public cv::FeatureDetector
+{
+public:
+    // descriptor radius is used only to init KeyPoints
+    HarrisFeatureDetector1(int radius, int max_feat_num)
+        : m_radius(radius), m_max_feat_num(max_feat_num) {}
+
+protected:
+    void
+    detectImpl(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
+    {
+        Mat harris_response;
+        //dst = Mat::zeros(image.size(), DataType<float>::type);
+        int block_size=3, aperture_size=5;
+        float step = 3.0, k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
+        cv::cornerHarris(image, harris_response, block_size, aperture_size, k, cv::BORDER_DEFAULT);
+        assert(harris_response.type() == DataType<float>::type);
+        float stride = 50;
+        int winx = (int)image.cols/stride;
+        int winy = (int)image.rows/stride;
+        struct elem {
+            int x, y;
+            float val;
+            elem(int x, int y, float val) : x(x), y(y), val(val) {}
+            elem() : x(-1), y(-1), val(NAN) {}
+            bool operator<(const elem& other) const{ return val<other.val; }
+        };
+        for(int i=0; i<winx; ++i)
+        {
+            for(int j=0; j<winy; ++j)
+            {
+                vector<elem> v;
+                v.reserve(stride*stride);
+                int k=0;
+                for(int x=i*stride; x<(i+1)*stride; ++x)
+                {
+                    for(int y=j*stride; y<(j+1)*stride; ++y)
+                    {
+                        float response = abs(harris_response.at<float>(y,x));
+                        if (isEqual(response,.0f))
+                            continue;
+                        v.push_back(elem(x,y,response));
+                        k++;
+                    }
+                }
+                int N=(int)2*1500/(winx*winy), m = (v.size()>N) ? v.size()-N : 0;
+                if (m>0)
+                    std::nth_element(v.begin(), v.begin()+m, v.end());
+                for(vector<elem>::iterator iter=v.begin()+m; iter<v.end(); ++iter)
+                {
+                    KeyPoint keypoint;
+                    keypoint.pt = Point2f(iter->x, iter->y);
+                    keypoint.response = iter->val;
+                    keypoint.size = 2*m_radius+1;
+                    kp.push_back(keypoint);
+                }
+            }
+        }
+        BOOST_LOG_TRIVIAL(debug) << "found " << kp.size() << " harris corners";
+    }
+    int m_radius, m_max_feat_num;
 };
 
 class MyFeatureExtractor : public cv::DescriptorExtractor
@@ -796,15 +956,15 @@ protected:
     void
     computeImpl(const Mat& image, vector<KeyPoint>& kp, Mat& d) const
     {
-        Mat sob(image.rows, image.cols, CV_32F, Scalar(0));
+        Mat sob(image.rows, image.cols, DataType<float>::type, Scalar(0));
         d = Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0));
         Sobel(image, sob, sob.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
         for(int k=0; k<kp.size(); ++k)
         {
             Point2i p = kp.at(k).pt;
-            for(int i=-m_descriptor_radius,col=0; i<m_descriptor_radius; ++i)
+            for(int i=-m_descriptor_radius,col=0; i<=m_descriptor_radius; i+=1)
             {
-                for(int j=-m_descriptor_radius; j<m_descriptor_radius; ++j,++col)
+                for(int j=-m_descriptor_radius; j<=m_descriptor_radius; j+=1,++col)
                 {
                     d.at<float>(k,col) = 
                         (p.y+i>0 && p.y+i<image.rows && p.x+j>0 && p.x+j<image.cols) ?
@@ -841,14 +1001,97 @@ localMatch(const KeyPoints& kp1, const KeyPoints& kp2,
     }
 }
 
+void
+mat2eig(const Mat& X, const Mat& X_prev, MatrixXf& Xe, MatrixXf& Xe_prev,
+        Matches& match_pcl)
+{
+    assert(X.type() == DataType<float>::type);
+    assert(X_prev.type() == DataType<float>::type);
+    for(int i=0; i<match_pcl.size(); ++i)
+    {
+        int ind1 = match_pcl.at(i)[0], ind2 = match_pcl.at(i)[1];
+        Xe(0,i) = X.at<float>(0,ind1);
+        Xe(1,i) = X.at<float>(1,ind1);
+        Xe(2,i) = X.at<float>(2,ind1);
+        Xe_prev(0,i) = X_prev.at<float>(0,ind2);
+        Xe_prev(1,i) = X_prev.at<float>(1,ind2);
+        Xe_prev(2,i) = X_prev.at<float>(2,ind2);
+    }
+}
+
+int nchoosek(int n, int k)
+{
+    int currentCombination[k];
+    for (int i=0; i<k; i++)
+        currentCombination[i]=i;
+    currentCombination[k-1] = k-1-1; // fill initial combination is real first combination -1 for last number, as we will increase it in loop
+
+    do
+    {
+        if (currentCombination[k-1] == (n-1) ) // if last number is just before overwhelm
+        {
+            int i = k-1-1;
+            while (currentCombination[i] == (n-k+i))
+                i--;
+            
+            currentCombination[i]++;
+            
+            for (int j=(i+1); j<k; j++)
+                currentCombination[j] = currentCombination[i]+j-i;
+        }
+        else
+            currentCombination[k-1]++;
+        
+        for (int i=0; i<k; i++)
+            printf("%d ", currentCombination[i]);
+        printf("\n");
+        
+    } while (! ((currentCombination[0] == (n-1-k+1)) && (currentCombination[k-1] == (n-1))) );
+}
+
+void
+ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
+                  const MatrixXf& Xe, const MatrixXf& Xe_prev,
+                  Affine3f& Tb, vector<int>& inliers)
+{
+    int N=100, model_size=3, max_sup_size=0;
+    double max_sup_rms=DBL_MAX;
+    for(int k=0; k<N; ++k)
+    {
+        set<int> sample = randomsample(model_size, Xe.cols());
+        Eigen::MatrixXf X1(3, model_size), X2(3, model_size);
+        int i=0;
+        for(auto j: sample)
+        {
+            X1.col(i) = Xe.col(j);
+            X2.col(i) = Xe_prev.col(j);
+            ++i;
+        }
+        Eigen::Affine3f T;
+        solveRigidMotion(X1, X2, T);
+        vector<int> inl;
+        double sample_rms = getRMS(X1, X2, T, inl, DBL_MAX);
+        double thresh = .3;
+        inl.clear();
+        double support_rms = getRMS(Xe, Xe_prev, T, inl, thresh);
+        if (inl.size()>max_sup_size) 
+        {
+            max_sup_rms = support_rms;
+            max_sup_size = inliers.size();
+            Tb = T;
+            inliers = inl;
+        }
+    }
+    BOOST_LOG_TRIVIAL(debug) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
+}
+
 // stereo odometry
 
 vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 {
-    MatrixXf eP1; cv2eigen(P1, eP1);
-//    cv::SiftFeatureDetector detector;
-    HarrisFeatureDetector detector(5);
+    int MAX_FEATURE_NUM = 1500;
+    HarrisFeatureDetector1 detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
     StereoImageGenerator::result_type stereo_pair;
     Mat F = F_from_P<double>(P1,P2);
@@ -866,7 +1109,7 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
     // current and previous set of keypoints
     KeyPoints kp1, kp2, kp1_prev, kp2_prev;
     // current and previous matches (for the stereo pair images)
-    Matches match, match_prev;
+    Matches match_lr, match_lr_prev;
     // result
     vector<Affine3f> poses;
     bool first = true;
@@ -877,155 +1120,79 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
         if (!first) 
         {
-            im1.copyTo(im1_prev);
-            im2.copyTo(im2_prev);
-            d1.copyTo(d1_prev);
-            d2.copyTo(d2_prev);
-            kp1_prev = kp1;
-            kp2_prev = kp2;
-            match_prev = match;
+            im1.copyTo(im1_prev); im2.copyTo(im2_prev);
+            d1.copyTo(d1_prev); d2.copyTo(d2_prev);
+            kp1_prev = kp1; kp2_prev = kp2;
+            match_lr_prev = match_lr;
             X.copyTo(X_prev);
-            kp1.clear();
-            kp2.clear();
-            match.clear();
+            kp1.clear(); kp2.clear();
+            match_lr.clear();
         }
         im1 = (*stereo_pair).first;
         im2 = (*stereo_pair).second;
         assert(im1.data && im2.data);
         detector.detect(im1,kp1);
 	detector.detect(im2,kp2);
-	BOOST_LOG_TRIVIAL(info) << kp1.size() << " keypoints found in the 1st image";
-	BOOST_LOG_TRIVIAL(info) << kp2.size() << " keypoints found in the 2nd image";
+	BOOST_LOG_TRIVIAL(info) << "using " << kp1.size() << " keypoints in the 1st image";
+	BOOST_LOG_TRIVIAL(info) << "using " << kp2.size() << " keypoints in the 2nd image";
         extractor.compute(im1, kp1, d1);
 	extractor.compute(im2, kp2, d2);
-        save1(im1, kp1, (boost::format("left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
-        save1(im2, kp2, (boost::format("right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
-        match_epip_constraint_flann(im1, im2, F, kp1, kp2, d1, d2, match, 0.8 /*2nd best ratio */, 1 /*sampson distance*/, .5 /*algebric error*/);
-        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs right: %d matches", match.size());
-        save2(im1, im2, kp1, kp2, match, (boost::format("lr_%03d.jpg") % iter_num).str().c_str());
-        exit(1);
-	cv::Mat x1(2, match.size(), CV_32FC1), x2(2, match.size(), CV_32FC1);
-	for(int i=0; i<match.size(); i++)
-	{
-	    int i1 = match.at(i)[0], i2 = match.at(i)[1];
-            x1.at<float>(0, i) = kp1.at(i1).pt.x;
-            x1.at<float>(1, i) = kp1.at(i1).pt.y;
-            x2.at<float>(0, i) = kp2.at(i2).pt.x;
-            x2.at<float>(1, i) = kp2.at(i2).pt.y;
-	}
+        save1(im1, kp1, (boost::format("harris_left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        save1(im2, kp2, (boost::format("harris_right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
+        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs right: %d matches", match_lr.size());
+        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format("lr_blend_%03d.jpg") % iter_num).str().c_str());
+
+	cv::Mat
+            x1(2, match_lr.size(), DataType<float>::type),
+            x2(2, match_lr.size(), DataType<float>::type);
+        collect_matches(kp1,kp2,match_lr,x1,x2);
+        // each col is a 3d pt
         X = triangulate_dlt(x1, x2, P1, P2);
-        //Eigen::MatrixXf eX, ex1; cv2eigen(x1, ex1); cv2eigen(X,eX);
-        //showProjection(im1, ex1, eX, eP1);
+        assert(X.type()==DataType<float>::type);
+        save1reproj(im1,X,x1,P1,(boost::format("tri_l%03d.jpg") % iter_num).str().c_str());
+        save1reproj(im1,X,x2,P2,(boost::format("tri_r%03d.jpg") % iter_num).str().c_str());
         if (first)
         {
             first = false;
             continue;
         }
-        Matches match11, match12, match22, match21;
-        Mat F11, F22, F12, F21;
-        Points2f p1, p1_prev, p2, p2_prev;
-        match_l2_2nd_best_flann(kp1, kp1_prev, d1, d1_prev, match11);
-        //show2(im1, im1_prev, kp1, kp1_prev, match11, "Left view match: current vs prev (2nd best)");
-        collect_matches(kp1, kp1_prev, match11, p1, p1_prev);
-        F11 = findFundamentalMat(p1, p1_prev, cv::FM_RANSAC, 3, .99999);
-        match_epip_constraint(F11, kp1, kp1_prev, d1, d1_prev, match11, .8, 3, .1);
-        save2(im1, im1_prev, kp1, kp1_prev, match11,
-              (boost::format("ll_%s.jpg")%iter_num).str().c_str(), 15);
+
+        Matches match11;
+        match_desc(kp1, kp1_prev, d1, d1_prev, match11);
+        save2blend(im1, im1_prev, kp1, kp1_prev, match11,
+              (boost::format("ll%d.jpg")%iter_num).str().c_str(), INT_MAX);
         BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
-        assert(F11.type()==6);
-        match_l2_2nd_best_flann(kp2, kp2_prev, d2, d2_prev, match22);
-        collect_matches(kp2, kp2_prev, match22, p2, p2_prev);
-        F22 = findFundamentalMat(p2, p2_prev, cv::FM_RANSAC);
-        match_epip_constraint(F22, kp2, kp2_prev, d2, d2_prev, match22, .8, 2, .5);
-        save2(im2, im2_prev, kp2, kp2_prev, match22,
-              (boost::format("rr_%s.jpg")%iter_num).str().c_str(), 15);
+
+        Matches match22;
+        match_desc(kp2, kp2_prev, d2, d2_prev, match22);
+        save2blend(im2, im2_prev, kp2, kp2_prev, match22,
+                   (boost::format("rr%d.jpg")%iter_num).str().c_str(), INT_MAX);
         BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
-        assert(F22.type()==6);
-        //cout << "F22:" << _str<double>(F22) << "; mean algebric error=" << algebricDistance(F22, p2, p2_prev) << endl;
-        // matches of 3d points
+
         Matches match_pcl; 
-        // circular match
         vector<Vec4i> circ_match;
-        for(int i=0; i<match.size(); ++i)
+        match_circle(match_lr, match_lr_prev, match11, match22, circ_match, match_pcl);
+        if (circ_match.size() < 3)
         {
-            int kpi1 = match[i][0],
-                kpi2 = match[i][1], 
-                kpi1_prev = kp_has_match(match11, 0, kpi1),
-                kpi2_prev = kp_has_match(match22, 0, kpi2);
-            if (kpi1_prev>0 && kpi2_prev>0)
-            {
-                int i_prev = kp_match(match_prev, kpi1_prev, kpi2_prev);
-                if (i_prev>0)
-                {
-                    circ_match.push_back(Vec4i(kpi1, kpi2, kpi1_prev, kpi2_prev));
-                    match_pcl.push_back(Match(i, i_prev));
-                }
-            }
-        }
-        MatrixXf eigX(3, match_pcl.size()), eigX_p(3, match_pcl.size());
-        assert(X.type() == DataType<float>::type);
-        assert(X_prev.type() == DataType<float>::type);
-        for(int i=0; i<match_pcl.size(); ++i)
-        {
-            int ind1 = match_pcl.at(i)[0], ind2 = match_pcl.at(i)[1];
-            eigX(0,i) = X.at<float>(0,ind1);
-            eigX(1,i) = X.at<float>(1,ind1);
-            eigX(2,i) = X.at<float>(2,ind1);
-            eigX_p(0,i) = X_prev.at<float>(0,ind2);
-            eigX_p(1,i) = X_prev.at<float>(1,ind2);
-            eigX_p(2,i) = X_prev.at<float>(2,ind2);
-        }
+            BOOST_LOG_TRIVIAL(error) << "not enough matches in current circle: " << circ_match.size();
+            poses.push_back(Affine3f::Identity());
+            continue;
+        } 
+        BOOST_LOG_TRIVIAL(info) << circ_match.size() << " points in circular match";
+        MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
+        mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
         save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
               (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
-        BOOST_LOG_TRIVIAL(info) << match_pcl.size() << " points in circular match";
-        BOOST_LOG_TRIVIAL(info) << "solving rigid motion" << endl;
-        if (match_pcl.size()>=3) 
-        {
-            //number of tries; number of points needed to estimate a model (rotation,translation matrix)
-            int N=10, model_pts_num = 3, ninliers=0;
-            double min_rms = DBL_MAX, rms=DBL_MAX;
-            vector<int> inliers;
-            vector<float> err;
-            Affine3f T_best;
-            vector<Vec4i> circ_match_best;
-
-            for(int k=0; k<N; ++k)
-            {
-                set<int> s = randomsample(model_pts_num, match_pcl.size());
-                Eigen::MatrixXf X1(3, model_pts_num), X2(3, model_pts_num);
-                vector<Vec4i> circ_match_sample;
-                int i=0;
-                for(auto j: s)
-                {
-                    circ_match_sample.push_back(circ_match.at(j));
-                    X1.col(i) = eigX.col(j);
-                    X2.col(i) = eigX_p.col(j);
-                    ++i;
-                }
-                Eigen::Affine3f T;
-                //T*X2 = X1
-                solveRigidMotion(X1, X2, T);
-                double sample_rms, inlier_rms, t=.2;
-                inliers.clear();
-                for(int i=0; i<3 && inliers.size()<3; ++i, t*=2)
-                {
-                    getRMS(eigX, eigX_p, T, inliers, err, rms, inlier_rms, t /*thresh*/);
-                }
-                if (ninliers<inliers.size())
-                {
-                    ninliers = inliers.size();
-                    T_best = T;
-                    circ_match_best = circ_match_sample;
-                }
-            }
-            poses.push_back(T_best);
-            show2Projections(im1, eigX, h2e(T_best.matrix()*e2h(eigX_p)), eP1,
-                             (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
-        } else {
-            // need something else
-            cout << "ERROR: not enough matches in circular match" << endl;
-            break;
-        }
+        BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
+        Affine3f T;
+        MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
+        vector<int> inliers;
+        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
+        poses.push_back(T);
+        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
+//        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
+//                         (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
     }
     BOOST_LOG_TRIVIAL(debug) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;
