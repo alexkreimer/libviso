@@ -255,11 +255,11 @@ save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_M
     cv::imwrite(file_name, im_rgb);
 }
 
-Eigen::MatrixXf
-projectPoints(const MatrixXf& X, const MatrixXf P)
+void
+projectPoints(const MatrixXf& X, const MatrixXf P, MatrixXf& x)
 {
-    MatrixXf t = h2e(P*e2h(X));
-    cout << "t.data()=" << t.data() << endl;
+    x = h2e(P*e2h(X));
+    cout << "x.data()=" << x.data() << endl;
 }
 
 Mat
@@ -277,8 +277,10 @@ showProjection(const Mat &im, const MatrixXf& x, const MatrixXf& X, const Matrix
     Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
     Scalar RED = Scalar(0,0,255), BLUE=Scalar(255,0,0);
-    drawPoints(im_rgb, x, RED, 5, 1);
-    drawPoints(im_rgb, projectPoints(X,P), BLUE, 3, -1);
+    drawPoints(im_rgb, x, RED, 5, 1);                          
+    MatrixXf x1;
+    projectPoints(X,P,x1);
+    drawPoints(im_rgb, x1, BLUE, 3, -1);
     string title("Original points are red; reprojections are blue");
     cv::namedWindow(title);
     imshow(title, im_rgb);
@@ -292,7 +294,9 @@ save2reproj(const Mat &im, const MatrixXf& X1, const MatrixXf& X2,
 {
     Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
-    MatrixXf x1 = projectPoints(X1,P), x2 = projectPoints(X2,P);
+    MatrixXf x1, x2;
+    projectPoints(X1,P,x1);
+    projectPoints(X2,P,x2);
     cout << "x1.data()=" << x1.data() << endl;
     cout << "x2.data()=" << x2.data() << endl;
     drawPoints(im_rgb, x1, Scalar(0,0,255), 2, -1);
@@ -306,8 +310,11 @@ save2reproj(const Mat &im, const MatrixXf& X1, const MatrixXf& X2,
 {
     Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
-    drawPoints(im_rgb, projectPoints(X1,P1), Scalar(0,0,255), 3, 1);
-    drawPoints(im_rgb, projectPoints(X2,P2), Scalar(0,255,0), 3, 1);
+    MatrixXf x1,x2;
+    projectPoints(X1,P1,x1);
+    projectPoints(X2,P2,x2);
+    drawPoints(im_rgb, x1, Scalar(0,0,255), 3, 1);
+    drawPoints(im_rgb, x2, Scalar(0,255,0), 3, 1);
     imwrite(file_name, im_rgb);
 }
 
@@ -317,7 +324,7 @@ save1reproj(const Mat& im, const Mat& X,const Mat& x, const Mat& P, const string
     cv::Mat im_rgb;
     cvtColor(im, im_rgb, CV_GRAY2RGB);
     drawPoints(im_rgb, x, Scalar(255,0,0), 1, -1);
-    drawPoints(im_rgb, projectPoints(X,P), Scalar(0,255,0), 3, 1);
+    drawPoints(im_rgb, projectPoints(X, P), Scalar(0,255,0), 3, 1);
     imwrite(file_name, im_rgb);
 }
 
@@ -620,7 +627,7 @@ match_desc(const KeyPoints& kp1, const KeyPoints& kp2,
         }
     }
     std::sort(match.begin(), match.end(), [](const Match &a, const Match &b) { return a[2]<b[2];});
-    BOOST_LOG_TRIVIAL(debug) << "match time [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC;
+    BOOST_LOG_TRIVIAL(info) << "match time [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC;
 }
 
 void
@@ -861,7 +868,7 @@ protected:
                 }
             }
         }
-        BOOST_LOG_TRIVIAL(debug) << "found " << kp.size() << " harris corners in " << tries << " iterations";
+        BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners in " << tries << " iterations";
         auto leq = [](const KeyPoint &a, const KeyPoint &b) { return true;/*a.response<=b.response;*/};
         //std::sort(kp.begin(), kp.end(), leq);
         if (kp.size() > m_max_feat_num)
@@ -928,7 +935,7 @@ protected:
                 }
             }
         }
-        BOOST_LOG_TRIVIAL(debug) << "found " << kp.size() << " harris corners";
+        BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners";
     }
     int m_radius, m_max_feat_num;
 };
@@ -1071,7 +1078,7 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
         solveRigidMotion(X1, X2, T);
         vector<int> inl;
         double sample_rms = getRMS(X1, X2, T, inl, DBL_MAX);
-        double thresh = .3;
+        double thresh = .1;
         inl.clear();
         double support_rms = getRMS(Xe, Xe_prev, T, inl, thresh);
         if (inl.size()>max_sup_size) 
@@ -1082,7 +1089,7 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
             inliers = inl;
         }
     }
-    BOOST_LOG_TRIVIAL(debug) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
+    BOOST_LOG_TRIVIAL(info) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
 }
 
 // stereo odometry
@@ -1140,7 +1147,7 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         save1(im1, kp1, (boost::format("harris_left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
         save1(im2, kp2, (boost::format("harris_right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
         match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
-        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs right: %d matches", match_lr.size());
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
         save2blend(im1, im2, kp1, kp2, match_lr, (boost::format("lr_blend_%03d.jpg") % iter_num).str().c_str());
 
 	cv::Mat
@@ -1162,20 +1169,20 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         match_desc(kp1, kp1_prev, d1, d1_prev, match11);
         save2blend(im1, im1_prev, kp1, kp1_prev, match11,
               (boost::format("ll%d.jpg")%iter_num).str().c_str(), INT_MAX);
-        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
 
         Matches match22;
         match_desc(kp2, kp2_prev, d2, d2_prev, match22);
         save2blend(im2, im2_prev, kp2, kp2_prev, match22,
                    (boost::format("rr%d.jpg")%iter_num).str().c_str(), INT_MAX);
-        BOOST_LOG_TRIVIAL(debug) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
 
         Matches match_pcl; 
         vector<Vec4i> circ_match;
         match_circle(match_lr, match_lr_prev, match11, match22, circ_match, match_pcl);
         if (circ_match.size() < 3)
         {
-            BOOST_LOG_TRIVIAL(error) << "not enough matches in current circle: " << circ_match.size();
+            BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " << circ_match.size();
             poses.push_back(Affine3f::Identity());
             continue;
         } 
@@ -1191,9 +1198,9 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
         poses.push_back(T);
         MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
-//        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
-//                         (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
+        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
+                    (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
     }
-    BOOST_LOG_TRIVIAL(debug) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
+    BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;
 }
