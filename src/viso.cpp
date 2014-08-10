@@ -1204,3 +1204,110 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;
 }
+
+
+calibratedSFM(const Mat& K, MonoImageGenerator& images)
+{
+    int MAX_FEATURE_NUM = 1500;
+    HarrisFeatureDetector1 detector(5, MAX_FEATURE_NUM);
+    MyFeatureExtractor extractor(5);
+    StereoImageGenerator::result_type image;
+    Mat F = F_from_P<double>(P1,P2);
+    if (F.at<double>(2,2) > DBL_MIN)
+    {
+        F /= F.at<double>(2,2);
+    }
+    BOOST_LOG_TRIVIAL(info) << (boost::format("P1=%s, P2=%s, F=%s") % _str<double>(P1) % _str<double>(P2) % _str<double>(F)).str();
+    // reconstructed 3d clouds
+    Mat X, X_prev;
+    // current and previous pair of images
+    Mat im1, im1_prev, im2, im2_prev;
+    // current and previous set of descriptors
+    Mat d1, d2, d1_prev, d2_prev;
+    // current and previous set of keypoints
+    KeyPoints kp1, kp2, kp1_prev, kp2_prev;
+    // current and previous matches (for the stereo pair images)
+    Matches match_lr, match_lr_prev;
+    // result
+    vector<Affine3f> poses;
+    bool first = true;
+    const clock_t begin_time = clock();
+    int iter_num;
+    for(iter_num=0; image=images(); ++iter_num)
+    {
+        BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
+        if (!first) 
+        {
+            im1.copyTo(im1_prev); im2.copyTo(im2_prev);
+            d1.copyTo(d1_prev); d2.copyTo(d2_prev);
+            kp1_prev = kp1; kp2_prev = kp2;
+            match_lr_prev = match_lr;
+            X.copyTo(X_prev);
+            kp1.clear(); kp2.clear();
+            match_lr.clear();
+        }
+        im1 = *image;
+        assert(im1.data);
+        detector.detect(im1,kp1);
+	BOOST_LOG_TRIVIAL(info) << "using " << kp1.size() << " keypoints in the 1st image";
+	BOOST_LOG_TRIVIAL(info) << "using " << kp2.size() << " keypoints in the 2nd image";
+        extractor.compute(im1, kp1, d1);
+        save1(im1, kp1, (boost::format("harris_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
+        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format("lr_blend_%03d.jpg") % iter_num).str().c_str());
+
+	cv::Mat
+            x1(2, match_lr.size(), DataType<float>::type),
+            x2(2, match_lr.size(), DataType<float>::type);
+        collect_matches(kp1,kp2,match_lr,x1,x2);
+        // each col is a 3d pt
+        X = triangulate_dlt(x1, x2, P1, P2);
+        assert(X.type()==DataType<float>::type);
+        save1reproj(im1,X,x1,P1,(boost::format("tri_l%03d.jpg") % iter_num).str().c_str());
+        save1reproj(im1,X,x2,P2,(boost::format("tri_r%03d.jpg") % iter_num).str().c_str());
+        if (first)
+        {
+            first = false;
+            continue;
+        }
+
+        Matches match11;
+        match_desc(kp1, kp1_prev, d1, d1_prev, match11);
+        save2blend(im1, im1_prev, kp1, kp1_prev, match11,
+              (boost::format("ll%d.jpg")%iter_num).str().c_str(), INT_MAX);
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
+
+        Matches match22;
+        match_desc(kp2, kp2_prev, d2, d2_prev, match22);
+        save2blend(im2, im2_prev, kp2, kp2_prev, match22,
+                   (boost::format("rr%d.jpg")%iter_num).str().c_str(), INT_MAX);
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
+
+        Matches match_pcl; 
+        vector<Vec4i> circ_match;
+        match_circle(match_lr, match_lr_prev, match11, match22, circ_match, match_pcl);
+        if (circ_match.size() < 3)
+        {
+            BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " << circ_match.size();
+            poses.push_back(Affine3f::Identity());
+            continue;
+        } 
+        BOOST_LOG_TRIVIAL(info) << circ_match.size() << " points in circular match";
+        MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
+        mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
+        save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
+              (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
+        BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
+        Affine3f T;
+        MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
+        vector<int> inliers;
+        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
+        poses.push_back(T);
+        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
+        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
+                    (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
+    }
+    BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
+    return poses;
+}
