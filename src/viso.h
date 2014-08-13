@@ -6,6 +6,8 @@
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/highgui/highgui_c.h>
+#include <opencv2/imgproc/types_c.h>
 #include <opencv2/nonfree/nonfree.hpp>
 
 #include <map>
@@ -73,6 +75,24 @@ private:
     string_pair m_mask;
 };
 
+class MonoImageGenerator {
+public:
+    typedef boost::optional<Mat> result_type;
+    MonoImageGenerator(const string& mask,int begin=0, int end=INT_MAX)
+	: m_mask(mask), m_index(begin), m_end(end) {}
+    result_type operator()() {
+        if (m_index > m_end)
+            return result_type();
+	string name = str(boost::format(m_mask) % m_index);
+        Mat image = cv::imread(name, CV_LOAD_IMAGE_GRAYSCALE);
+        m_index++;
+	return image.data ? result_type(image) : result_type();
+    }
+private:
+    int m_index, m_end;
+    string m_mask;
+};
+
 /*** Read the intrinsic and extrinsic parameters
      Note: this works for KITTI, will probably need to be updated for another dataset 
 */
@@ -111,4 +131,7 @@ void
 save2(const cv::Mat& m1, const cv::Mat& m2, const KeyPoints& kp1,
       const KeyPoints& kp2, const Matches &match, const string &file_name,
       int lim=50);
+void
+calibratedSFM(const Mat& K, MonoImageGenerator& images);
+
 #endif

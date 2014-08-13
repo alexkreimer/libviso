@@ -33,8 +33,11 @@ using namespace boost;
 
 using cv::Vec3i;
 using cv::Vec4i;
+using cv::Vec2f;
 using cv::DataType;
 using cv::FM_RANSAC;
+using cv::InputArray;
+using cv::OutputArray;
 
 class Odometer
 {
@@ -578,7 +581,7 @@ match_desc(const KeyPoints& kp1, const KeyPoints& kp2,
 {
     const clock_t begin_time = clock();
     match.clear();
-    assert(d1.cols==d2.cols);
+    BOOST_ASSERT_MSG(d1.cols==d2.cols, (boost::format("d1.cols=%d,d2.cols=%d") % d1.cols % d2.cols).str().c_str());
     // cv::flann::Index index = (sp.allow_ann) ? 
     //     cv::flann::Index(kp2mat(kp2), cv::flann::KDTreeIndexParams(16), ::cvflann::FLANN_DIST_L1) :
     //     cv::flann::Index(kp2mat(kp2), cv::flann::LinearIndexParams(), ::cvflann::FLANN_DIST_L1);
@@ -737,12 +740,6 @@ kp_match(const Matches& match, int kpi1, int kpi2)
     return -1;
 }
 
-class CustomFeatureDetector : public cv::FeatureDetector
-{
-protected:
-    void detectImpl(const Mat& image, std::vector<cv::KeyPoint>& kp, const Mat& mask=Mat()) const {}
-};
-
 void
 myhist(const Mat& image)
 {
@@ -819,84 +816,31 @@ showHarris(const Mat& harris_response, int thresh)
     cv::waitKey(0);
 }
 
-class HarrisFeatureDetector : public cv::FeatureDetector
+class HarrisBinnedFeatureDetector : public cv::FeatureDetector
 {
 public:
     // descriptor radius is used only to init KeyPoints
-    HarrisFeatureDetector(int radius, int max_feat_num)
-        : m_radius(radius), m_max_feat_num(max_feat_num) {}
-
-protected:
-    void
-    detectImpl(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
-    {
-        Mat dst, dst_norm;
-        dst = Mat::zeros(image.size(), DataType<float>::type);
-        int block_size=3, aperture_size=5;
-        double thresh = 80.0, step = 3.0, k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
-        cv::cornerHarris(image, dst, block_size, aperture_size, k, cv::BORDER_DEFAULT);
-        cv::normalize(dst, dst_norm, 0, 255, cv::NORM_MINMAX, CV_32FC1, Mat());
-        int tries;
-        for(tries=0; 
-            tries < 3 && (kp.size() < m_max_feat_num || kp.size() > m_max_feat_num*3);
-            ++tries)
+    HarrisBinnedFeatureDetector(int radius, int n, int nbinx=6, int nbiny=3, float k = .04,
+                                int block_size=3, int aperture_size=5)
+        : m_radius(radius), m_nbinx(nbinx), m_nbiny(nbiny), 
+          m_block_size(block_size), m_aperture_size(aperture_size), m_n(n)
         {
-            if (kp.size() > 0)
-            {
-                if (kp.size() < m_max_feat_num)
-                {
-                    thresh -= step;
-                } else {
-                    thresh += step;
-                }
-                kp.clear(); ++tries;
-            }
-            for(int j=0; j<dst_norm.rows ; j++ )
-            {
-                for( int i = 0; i<dst_norm.cols; i++ )
-                {
-                    int response = (int)dst_norm.at<float>(j,i);
-                    if (response>thresh && i>m_radius && j>m_radius &&
-                        i+m_radius<dst_norm.cols && j+m_radius<dst_norm.rows)
-                    {
-                        KeyPoint keypoint;
-                        keypoint.pt = Point2f(i,j);
-                        keypoint.response = response;
-                        keypoint.size = 2*m_radius+1;
-                        kp.push_back(keypoint);
-                    }
-                }
-            }
+            assert(nbinx>0 && nbiny>0);
         }
-        BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners in " << tries << " iterations";
-        auto leq = [](const KeyPoint &a, const KeyPoint &b) { return true;/*a.response<=b.response;*/};
-        //std::sort(kp.begin(), kp.end(), leq);
-        if (kp.size() > m_max_feat_num)
-            kp.erase(m_max_feat_num+kp.begin(), kp.end());
-    }
-    int m_radius, m_max_feat_num;
-};
-
-class HarrisFeatureDetector1 : public cv::FeatureDetector
-{
-public:
-    // descriptor radius is used only to init KeyPoints
-    HarrisFeatureDetector1(int radius, int max_feat_num)
-        : m_radius(radius), m_max_feat_num(max_feat_num) {}
 
 protected:
+
     void
-    detectImpl(const Mat& image, vector<KeyPoint>& kp, const Mat& mask=Mat()) const
+    detectImpl(cv::InputArray image, KeyPoints& kp, cv::InputArray mask=Mat()) const
     {
         Mat harris_response;
-        //dst = Mat::zeros(image.size(), DataType<float>::type);
-        int block_size=3, aperture_size=5;
-        float step = 3.0, k=.04; // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
-        cv::cornerHarris(image, harris_response, block_size, aperture_size, k, cv::BORDER_DEFAULT);
+        // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
+        cv::cornerHarris(image, harris_response, m_block_size, m_aperture_size,
+                         m_k, cv::BORDER_DEFAULT);
         assert(harris_response.type() == DataType<float>::type);
-        float stride = 50;
-        int winx = (int)image.cols/stride;
-        int winy = (int)image.rows/stride;
+        int stridex = (int)image.getMat().cols/m_nbinx,
+            stridey = (int)image.getMat().rows/m_nbiny;
+        assert(stridex>0 && stridey>0);
         struct elem {
             int x, y;
             float val;
@@ -904,16 +848,17 @@ protected:
             elem() : x(-1), y(-1), val(NAN) {}
             bool operator<(const elem& other) const{ return val<other.val; }
         };
-        for(int i=0; i<winx; ++i)
+        int corners_per_block = (int)m_n/(m_nbinx*m_nbiny);
+        for(int i=0; i<m_nbinx; ++i)
         {
-            for(int j=0; j<winy; ++j)
+            for(int j=0; j<m_nbiny; ++j)
             {
                 vector<elem> v;
-                v.reserve(stride*stride);
+                v.reserve(stridex*stridey);
                 int k=0;
-                for(int x=i*stride; x<(i+1)*stride; ++x)
+                for(int x=i*stridex; x<(i+1)*stridex; ++x)
                 {
-                    for(int y=j*stride; y<(j+1)*stride; ++y)
+                    for(int y=j*stridey; y<(j+1)*stridey; ++y)
                     {
                         float response = abs(harris_response.at<float>(y,x));
                         if (isEqual(response,.0f))
@@ -922,7 +867,7 @@ protected:
                         k++;
                     }
                 }
-                int N=(int)2*1500/(winx*winy), m = (v.size()>N) ? v.size()-N : 0;
+                int m = (v.size()>corners_per_block) ? v.size()-corners_per_block : 0;
                 if (m>0)
                     std::nth_element(v.begin(), v.begin()+m, v.end());
                 for(vector<elem>::iterator iter=v.begin()+m; iter<v.end(); ++iter)
@@ -937,7 +882,8 @@ protected:
         }
         BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners";
     }
-    int m_radius, m_max_feat_num;
+    int m_radius, m_nbinx, m_nbiny, m_block_size, m_aperture_size,m_n;
+    float m_k;
 };
 
 class MyFeatureExtractor : public cv::DescriptorExtractor
@@ -948,6 +894,10 @@ public:
 protected:
     int m_descriptor_radius;
 
+    int defaultNorm() const
+    {
+        return cv::NORM_L1;
+    }
     int descriptorType() const
     {
         return DataType<float>::type;
@@ -959,12 +909,12 @@ protected:
         return (2*m_descriptor_radius+1)*(2*m_descriptor_radius+1);
     }
 
-    /* TODO: check border */
-    void
-    computeImpl(const Mat& image, vector<KeyPoint>& kp, Mat& d) const
+    void computeImpl(InputArray image, std::vector<KeyPoint>& kp, OutputArray d) const
     {
-        Mat sob(image.rows, image.cols, DataType<float>::type, Scalar(0));
-        d = Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0));
+        Mat sob(image.rows(), image.cols(), DataType<float>::type, Scalar(0));
+
+        Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0)).copyTo(d);
+        assert(d.getMat().data);
         Sobel(image, sob, sob.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
         for(int k=0; k<kp.size(); ++k)
         {
@@ -973,9 +923,9 @@ protected:
             {
                 for(int j=-m_descriptor_radius; j<=m_descriptor_radius; j+=1,++col)
                 {
-                    d.at<float>(k,col) = 
-                        (p.y+i>0 && p.y+i<image.rows && p.x+j>0 && p.x+j<image.cols) ?
+                    float val = (p.y+i>0 && p.y+i<image.rows() && p.x+j>0 && p.x+j<image.cols()) ?
                         sob.at<float>(p.y+i, p.x+j) : 0;
+                    d.getMat().at<float>(k,col) = val;
                 }
             }
         }
@@ -1098,7 +1048,7 @@ vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 {
     int MAX_FEATURE_NUM = 1500;
-    HarrisFeatureDetector1 detector(5, MAX_FEATURE_NUM);
+    HarrisBinnedFeatureDetector detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
     StereoImageGenerator::result_type stereo_pair;
     Mat F = F_from_P<double>(P1,P2);
@@ -1205,109 +1155,70 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
     return poses;
 }
 
-
+void
 calibratedSFM(const Mat& K, MonoImageGenerator& images)
 {
     int MAX_FEATURE_NUM = 1500;
-    HarrisFeatureDetector1 detector(5, MAX_FEATURE_NUM);
-    MyFeatureExtractor extractor(5);
-    StereoImageGenerator::result_type image;
-    Mat F = F_from_P<double>(P1,P2);
-    if (F.at<double>(2,2) > DBL_MIN)
-    {
-        F /= F.at<double>(2,2);
-    }
-    BOOST_LOG_TRIVIAL(info) << (boost::format("P1=%s, P2=%s, F=%s") % _str<double>(P1) % _str<double>(P2) % _str<double>(F)).str();
-    // reconstructed 3d clouds
-    Mat X, X_prev;
-    // current and previous pair of images
-    Mat im1, im1_prev, im2, im2_prev;
-    // current and previous set of descriptors
-    Mat d1, d2, d1_prev, d2_prev;
-    // current and previous set of keypoints
-    KeyPoints kp1, kp2, kp1_prev, kp2_prev;
-    // current and previous matches (for the stereo pair images)
-    Matches match_lr, match_lr_prev;
-    // result
-    vector<Affine3f> poses;
-    bool first = true;
+    HarrisBinnedFeatureDetector detector(9, MAX_FEATURE_NUM);
+    MyFeatureExtractor extractor(9);
+    MonoImageGenerator::result_type image;
+    Mat im1, im1_prev;
+    Mat d1, d1_prev;
+    KeyPoints kp1, kp1_prev;
+    Matches match, match_prev;
     const clock_t begin_time = clock();
     int iter_num;
+    assert(K.type()==DataType<double>::type);
+    float focal = K.at<double>(0,0);
+    Point2f pp(K.at<double>(0,3), K.at<double>(1,3));
     for(iter_num=0; image=images(); ++iter_num)
     {
         BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
-        if (!first) 
+        if (iter_num) 
         {
-            im1.copyTo(im1_prev); im2.copyTo(im2_prev);
-            d1.copyTo(d1_prev); d2.copyTo(d2_prev);
-            kp1_prev = kp1; kp2_prev = kp2;
-            match_lr_prev = match_lr;
-            X.copyTo(X_prev);
-            kp1.clear(); kp2.clear();
-            match_lr.clear();
+            im1.copyTo(im1_prev); d1.copyTo(d1_prev);
+            kp1_prev = kp1; match_prev = match;
+            kp1.clear(); match.clear();
         }
-        im1 = *image;
-        assert(im1.data);
+        im1 = *image; assert(im1.data);
         detector.detect(im1,kp1);
+        assert(kp1.size()>0);
 	BOOST_LOG_TRIVIAL(info) << "using " << kp1.size() << " keypoints in the 1st image";
-	BOOST_LOG_TRIVIAL(info) << "using " << kp2.size() << " keypoints in the 2nd image";
         extractor.compute(im1, kp1, d1);
-        save1(im1, kp1, (boost::format("harris_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
-        match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
-        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
-        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format("lr_blend_%03d.jpg") % iter_num).str().c_str());
-
-	cv::Mat
-            x1(2, match_lr.size(), DataType<float>::type),
-            x2(2, match_lr.size(), DataType<float>::type);
-        collect_matches(kp1,kp2,match_lr,x1,x2);
-        // each col is a 3d pt
-        X = triangulate_dlt(x1, x2, P1, P2);
-        assert(X.type()==DataType<float>::type);
-        save1reproj(im1,X,x1,P1,(boost::format("tri_l%03d.jpg") % iter_num).str().c_str());
-        save1reproj(im1,X,x2,P2,(boost::format("tri_r%03d.jpg") % iter_num).str().c_str());
-        if (first)
-        {
-            first = false;
+        save1(im1, kp1, (boost::format("kp_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        if (!iter_num)
             continue;
+        MatchParams short_mp;
+        short_mp.radius = 10;
+        match_desc(kp1, kp1_prev, d1, d1_prev, match, short_mp);
+        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching: %d matches", match.size());
+        save2blend(im1, im1, kp1, kp1_prev, match, (boost::format("match0_%03d.jpg") % iter_num).str().c_str());
+	cv::Mat x1(2, match.size(), DataType<float>::type), x2(2, match.size(), DataType<float>::type);
+        collect_matches(kp1, kp1_prev, match, x1, x2);
+        Mat x1t, x2t;
+        transpose(x1,x1t);
+        transpose(x2,x2t);
+        Mat x1t2c(x1t.rows, 1, CV_32FC2), x2t2c(x2t.rows, 1, CV_32FC2),
+            x1t_normalized(x1t.rows, 1, CV_32FC2), x2t_normalized(x2t.rows, 1, CV_32FC2);
+        for(int i=0; i<x1t.rows; ++i)
+        {
+            x1t2c.at<Vec2f>(i) = Vec2f(x1t.at<float>(i,0), x1t.at<float>(i,1));
+            x2t2c.at<Vec2f>(i) = Vec2f(x2t.at<float>(i,0), x2t.at<float>(i,1));
         }
-
-        Matches match11;
-        match_desc(kp1, kp1_prev, d1, d1_prev, match11);
-        save2blend(im1, im1_prev, kp1, kp1_prev, match11,
-              (boost::format("ll%d.jpg")%iter_num).str().c_str(), INT_MAX);
-        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
-
-        Matches match22;
-        match_desc(kp2, kp2_prev, d2, d2_prev, match22);
-        save2blend(im2, im2_prev, kp2, kp2_prev, match22,
-                   (boost::format("rr%d.jpg")%iter_num).str().c_str(), INT_MAX);
-        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
-
-        Matches match_pcl; 
-        vector<Vec4i> circ_match;
-        match_circle(match_lr, match_lr_prev, match11, match22, circ_match, match_pcl);
-        if (circ_match.size() < 3)
-        {
-            BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " << circ_match.size();
-            poses.push_back(Affine3f::Identity());
-            continue;
-        } 
-        BOOST_LOG_TRIVIAL(info) << circ_match.size() << " points in circular match";
-        MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
-        mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
-        save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
-              (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
-        BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
-        Affine3f T;
-        MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
-        vector<int> inliers;
-        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
-        poses.push_back(T);
-        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
-        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
-                    (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
+        undistortPoints(x1t2c, x1t_normalized, K, Mat());
+        undistortPoints(x2t2c, x2t_normalized, K, Mat());
+        Mat E = findEssentialMat(x1t, x2t, focal, pp);
+        Mat F = (K.inv()).t()*E*(K.inv());
+        MatchParams mp(F);
+        mp.enforce_2nd_best = true;
+        mp.ratio_2nd_best = .9;
+        mp.radius = 10;
+        match_desc(kp1, kp1_prev, d1, d1_prev, match,mp);
+        save2blend(im1, im1_prev, kp1, kp1_prev, match,
+                   (boost::format("match_%d.jpg")%iter_num).str().c_str(), INT_MAX);
+        Mat P1(3,4,DataType<float>::type,Scalar(0)), P2(3,4,DataType<float>::type,Scalar(0));
+        P1.at<float>(0,0) = P1.at<float>(1,1) = P1.at<float>(2,2) = 1.0;
+        P2.at<float>(0,0) = P2.at<float>(1,1) = P2.at<float>(2,2) = 1.0;
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
-    return poses;
 }

@@ -50,8 +50,8 @@ string _str(const Mat& m, bool include_dims=true, int truncate=16,
 template<class T>
 Mat vcat(const Mat& m1, const Mat& m2)
 {
-    assert(m1.cols == m2.cols);
-    assert(m1.type() == m2.type());
+//    assert(m1.cols() == m2.cols());
+//    assert(m1.type() == m2.type());
     Mat res(m1.rows+m2.rows,m1.cols,m1.type());
     for (int i=0; i<m1.rows; ++i)
     {
@@ -73,8 +73,8 @@ Mat vcat(const Mat& m1, const Mat& m2)
 template<class T>
 Mat hcat(const Mat& m1, const Mat& m2)
 {
-    assert(m1.rows == m2.rows);
-    assert(m1.type() == m2.type());
+//    assert(m1.rows() == m2.rows());
+//    assert(m1.type() == m2.type());
     
     Mat m(m1.rows, m1.cols+m2.cols, m1.type());
     for(int i=0; i<m1.rows; ++i)
