@@ -90,7 +90,8 @@ int main(int argc, char** argv)
     for(int j=2; argv[j]; ++j)
     {
         string seq_name(argv[j]);
-        fs::path result_dir = fs::path(KITTI_HOME)/"results"/result_sha/seq_name/"data"
+        fs::path result_dir = fs::path(KITTI_HOME) / "results" / seq_name / result_sha;
+        fs::create_directories(result_dir);
         BOOST_LOG_TRIVIAL(info) << "Processing sequence: " << seq_name;
         Mat P1(3,4,cv::DataType<double>::type), P2(3,4,cv::DataType<double>::type);
         string calib_file_name = (seq_base/seq_name/"calib.txt").string();
@@ -99,8 +100,8 @@ int main(int argc, char** argv)
         assert(res);
         StereoImageGenerator images(StereoImageGenerator::string_pair(
                                         (seq_base / seq_name / "image_0" / "%06d.png").string(),
-                                        (seq_base / seq_name / "image_1" / "%06d.png").string()));
-        vector<Affine3f> poses = sequenceOdometry(P1, P2, images, result_dir.string());
+                                        (seq_base / seq_name / "image_1" / "%06d.png").string()),0,300);
+        vector<Affine3f> poses = sequenceOdometry(P1, P2, images, result_dir);
         vector<Affine3f> kitti_poses;
         Affine3f Tk = Affine3f::Identity();
         int i=0;
@@ -114,7 +115,9 @@ int main(int argc, char** argv)
             }
             Tk = T*Tk;
         }
-        string poses_file_name((result_dir / (seq_name + ".txt")).string());
+        fs::path poses_dir(result_dir/"data");
+        create_directories(poses_dir);
+        string poses_file_name((poses_dir/(seq_name+".txt")).string());
         BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
         savePoses(poses_file_name, kitti_poses);
     }

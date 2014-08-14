@@ -262,7 +262,6 @@ void
 projectPoints(const MatrixXf& X, const MatrixXf P, MatrixXf& x)
 {
     x = h2e(P*e2h(X));
-    cout << "x.data()=" << x.data() << endl;
 }
 
 Mat
@@ -300,8 +299,6 @@ save2reproj(const Mat &im, const MatrixXf& X1, const MatrixXf& X2,
     MatrixXf x1, x2;
     projectPoints(X1,P,x1);
     projectPoints(X2,P,x2);
-    cout << "x1.data()=" << x1.data() << endl;
-    cout << "x2.data()=" << x2.data() << endl;
     drawPoints(im_rgb, x1, Scalar(0,0,255), 2, -1);
     drawPoints(im_rgb, x2, Scalar(0,255,0), 3, 1);
     imwrite(file_name, im_rgb);
@@ -820,8 +817,8 @@ class HarrisBinnedFeatureDetector : public cv::FeatureDetector
 {
 public:
     // descriptor radius is used only to init KeyPoints
-    HarrisBinnedFeatureDetector(int radius, int n, int nbinx=6, int nbiny=3, float k = .04,
-                                int block_size=3, int aperture_size=5)
+    HarrisBinnedFeatureDetector(int radius, int n, int nbinx=24, int nbiny=5,
+                                float k = .04, int block_size=3, int aperture_size=5)
         : m_radius(radius), m_nbinx(nbinx), m_nbiny(nbiny), 
           m_block_size(block_size), m_aperture_size(aperture_size), m_n(n)
         {
@@ -841,7 +838,8 @@ protected:
         int stridex = (int)image.getMat().cols/m_nbinx,
             stridey = (int)image.getMat().rows/m_nbiny;
         assert(stridex>0 && stridey>0);
-        struct elem {
+        struct elem
+        {
             int x, y;
             float val;
             elem(int x, int y, float val) : x(x), y(y), val(val) {}
@@ -849,22 +847,20 @@ protected:
             bool operator<(const elem& other) const{ return val<other.val; }
         };
         int corners_per_block = (int)m_n/(m_nbinx*m_nbiny);
-        for(int i=0; i<m_nbinx; ++i)
+        vector<elem> v;
+        v.reserve(stridex*stridey);
+        for(int binx=0; binx<m_nbinx; ++binx)
         {
-            for(int j=0; j<m_nbiny; ++j)
+            for(int biny=0; biny<m_nbiny; ++biny)
             {
-                vector<elem> v;
-                v.reserve(stridex*stridey);
-                int k=0;
-                for(int x=i*stridex; x<(i+1)*stridex; ++x)
+                for(int x=binx*stridex; x<(binx+1)*stridex && x<harris_response.cols; ++x)
                 {
-                    for(int y=j*stridey; y<(j+1)*stridey; ++y)
+                    for(int y=biny*stridey; y<(biny+1)*stridey && y<harris_response.rows; ++y)
                     {
                         float response = abs(harris_response.at<float>(y,x));
                         if (isEqual(response,.0f))
                             continue;
                         v.push_back(elem(x,y,response));
-                        k++;
                     }
                 }
                 int m = (v.size()>corners_per_block) ? v.size()-corners_per_block : 0;
@@ -878,6 +874,7 @@ protected:
                     keypoint.size = 2*m_radius+1;
                     kp.push_back(keypoint);
                 }
+                v.clear();
             }
         }
         BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners";
@@ -1045,9 +1042,10 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
 // stereo odometry
 
 vector<Affine3f>
-sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
+sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
+                 const boost::filesystem::path& dbg_dir)
 {
-    int MAX_FEATURE_NUM = 1500;
+    int MAX_FEATURE_NUM = 5000;
     HarrisBinnedFeatureDetector detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
     StereoImageGenerator::result_type stereo_pair;
@@ -1094,11 +1092,11 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
 	BOOST_LOG_TRIVIAL(info) << "using " << kp2.size() << " keypoints in the 2nd image";
         extractor.compute(im1, kp1, d1);
 	extractor.compute(im2, kp2, d2);
-        save1(im1, kp1, (boost::format("harris_left_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
-        save1(im2, kp2, (boost::format("harris_right_%03d.jpg") % iter_num).str().c_str(), INT_MAX);
+        save1(im1, kp1, (boost::format((dbg_dir/"harris_left_%03d.jpg").string()) % iter_num).str().c_str(), INT_MAX);
+        save1(im2, kp2, (boost::format((dbg_dir/"harris_right_%03d.jpg").string()) % iter_num).str().c_str(), INT_MAX);
         match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
         BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
-        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format("lr_blend_%03d.jpg") % iter_num).str().c_str());
+        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format((dbg_dir/"lr_blend_%03d.jpg").string()) % iter_num).str().c_str());
 
 	cv::Mat
             x1(2, match_lr.size(), DataType<float>::type),
@@ -1107,8 +1105,8 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         // each col is a 3d pt
         X = triangulate_dlt(x1, x2, P1, P2);
         assert(X.type()==DataType<float>::type);
-        save1reproj(im1,X,x1,P1,(boost::format("tri_l%03d.jpg") % iter_num).str().c_str());
-        save1reproj(im1,X,x2,P2,(boost::format("tri_r%03d.jpg") % iter_num).str().c_str());
+        save1reproj(im1,X,x1,P1,(boost::format((dbg_dir/"tri_l%03d.jpg").string()) % iter_num).str().c_str());
+        save1reproj(im1,X,x2,P2,(boost::format((dbg_dir/"tri_r%03d.jpg").string()) % iter_num).str().c_str());
         if (first)
         {
             first = false;
@@ -1118,13 +1116,13 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         Matches match11;
         match_desc(kp1, kp1_prev, d1, d1_prev, match11);
         save2blend(im1, im1_prev, kp1, kp1_prev, match11,
-              (boost::format("ll%d.jpg")%iter_num).str().c_str(), INT_MAX);
+                   (boost::format((dbg_dir/"ll%d.jpg").string())%iter_num).str().c_str(), INT_MAX);
         BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
 
         Matches match22;
         match_desc(kp2, kp2_prev, d2, d2_prev, match22);
         save2blend(im2, im2_prev, kp2, kp2_prev, match22,
-                   (boost::format("rr%d.jpg")%iter_num).str().c_str(), INT_MAX);
+                   (boost::format((dbg_dir/"rr%d.jpg").string())%iter_num).str().c_str(), INT_MAX);
         BOOST_LOG_TRIVIAL(info) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
 
         Matches match_pcl; 
@@ -1140,7 +1138,7 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
         mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
         save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
-              (boost::format("circ_match_%03d.jpg") % iter_num).str().c_str());
+              (boost::format((dbg_dir/"circ_match_%03d.jpg").string()) % iter_num).str().c_str());
         BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
         Affine3f T;
         MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
@@ -1149,7 +1147,7 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images)
         poses.push_back(T);
         MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
         save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
-                    (boost::format("reproj_%03d.jpg") % iter_num).str().c_str());
+                    (boost::format((dbg_dir/"reproj_%03d.jpg").string()) % iter_num).str().c_str());
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;

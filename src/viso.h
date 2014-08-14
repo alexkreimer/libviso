@@ -21,6 +21,7 @@
 #include <stdlib.h>
 
 #include <boost/format.hpp>
+#include <boost/filesystem.hpp>
 
 #include <Eigen/Dense>
 
@@ -111,7 +112,7 @@ findConstrainedCorrespondences(const Mat& F, const KeyPoints& kp1,
 			       double eps, double ratio);
 
 vector<Affine3f>
-sequenceOdometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images);
+sequenceOdometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images, const boost::filesystem::path& dbg_dir);
 
 
 void
