@@ -26,10 +26,15 @@ In order to start working you need:
 * see top level CMakeLists.txt, there are paths to the libs that you will need to change
 * clone the repository to your computer and build it (if this succeedes you are in good shape): 
 git clone https://github.com/alexkreimer/libviso.git
+
 git checkout ss_circular_match
+
 cd ss_circular_match
+
 mkdir debug
+
 cmake -DCMAKE_BUILD_TYPE=Debug ..
+
 make
 
 
