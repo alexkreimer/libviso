@@ -45,6 +45,13 @@ class Odometer
     const cv::DescriptorExtractor &descriptor;
 };
 
+boost::filesystem::path dbgDir;
+
+struct 
+{
+    double f, base_line, cu, cv;
+} calib;
+
 struct MatchParams
 {
     bool enforce_epipolar;
@@ -143,7 +150,6 @@ radiusSearch(cvflann::Index<cvflann::L1<float>>& index, Mat& query_points,
 #endif        
     }
 }
-
 
 void
 match_circle(const Matches& match_lr, const Matches& match_lr_prev,
@@ -258,12 +264,6 @@ save1(const Mat& im, const KeyPoints& kp, const string& file_name, int lim=INT_M
     cv::imwrite(file_name, im_rgb);
 }
 
-void
-projectPoints(const MatrixXf& X, const MatrixXf P, MatrixXf& x)
-{
-    x = h2e(P*e2h(X));
-}
-
 Mat
 projectPoints(const Mat& X, const Mat& P)
 {
@@ -271,6 +271,41 @@ projectPoints(const Mat& X, const Mat& P)
     Mat Xh = e2h<float>(X), Pf;
     P.convertTo(Pf, DataType<float>::type);
     return h2e<float>(Pf*Xh);
+}
+
+void
+projectPoints(const MatrixXf& X, const MatrixXf P, MatrixXf& x)
+{
+    x = h2e(P*e2h(X));
+}
+
+Mat
+projectPoints(const Mat& X)
+{
+    assert(X.type()==DataType<float>::type);
+    Mat x(2,X.cols,DataType<float>::type);
+    for(int i=0; i<X.cols; ++i)
+    {
+        x.at<float>(0,i) = X.at<float>(0,i)*calib.f/X.at<float>(3,i);
+        x.at<float>(1,i) = X.at<float>(1,i)*calib.f/X.at<float>(3,i);
+    }
+    return x;
+}
+
+void
+save2(const Mat& im,
+      const Mat& x_observe,
+      const Mat& x_predict,
+      const std::string& file_name)
+{
+    Mat im_rgb;
+    cvtColor(im, im_rgb, CV_GRAY2RGB);
+    cout << "x_observe:" << _str<float>(x_observe) << endl;
+    cout << "x_predict:" << _str<float>(x_predict) << endl;
+    drawPoints(im_rgb, x_observe, Scalar(0,0,255), 2, -1);
+    drawPoints(im_rgb, x_predict, Scalar(0,255,0), 3, 1);
+    imwrite(file_name, im_rgb);
+    BOOST_LOG_TRIVIAL(info) << "wrote " << file_name;
 }
 
 void
@@ -1004,9 +1039,260 @@ int nchoosek(int n, int k)
 }
 
 void
-ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
-                  const MatrixXf& Xe, const MatrixXf& Xe_prev,
-                  Affine3f& Tb, vector<int>& inliers)
+computeResidualsAndJacobian(const Mat& Xp, /* 3d points from previous iteration */
+                            const Mat& x_observe, /* observed pixels */
+                            const vector<double>& tr, /* current params*/
+                            const vector<int>& sample, /* current sample points */
+                            Mat& residual, /* output param: residuals */
+                            Mat& J /* output param: Jacobian */,
+                            Mat& x_predict /* output param: projected 3d points */)
+{
+    cout << "tr:";
+    for (auto c : tr)
+        std::cout << c << ' ';
+    cout << endl;
+
+    // extract motion parameters rx, ry, rz RPY (roll-pitch-yaw)
+    double rx = tr[0]; double ry = tr[1]; double rz = tr[2];
+    double tx = tr[3]; double ty = tr[4]; double tz = tr[5];
+
+    // precompute sine/cosine
+    double sx = sin(rx); double cx = cos(rx); double sy = sin(ry);
+    double cy = cos(ry); double sz = sin(rz); double cz = cos(rz);
+
+    // rotation matrix
+    double r00    = +cy*cz;          double r01    = -cy*sz;          double r02    = +sy;
+    double r10    = +sx*sy*cz+cx*sz; double r11    = -sx*sy*sz+cx*cz; double r12    = -sx*cy;
+    double r20    = -cx*sy*cz+sx*sz; double r21    = +cx*sy*sz+sx*cz; double r22    = +cx*cy;
+
+    // derivatives w.r.t motion params
+    double rdrx10 = +cx*sy*cz-sx*sz; double rdrx11 = -cx*sy*sz-sx*cz; double rdrx12 = -cx*cy;
+    double rdrx20 = +sx*sy*cz+cx*sz; double rdrx21 = -sx*sy*sz+cx*cz; double rdrx22 = -sx*cy;
+    double rdry00 = -sy*cz;          double rdry01 = +sy*sz;          double rdry02 = +cy;
+    double rdry10 = +sx*cy*cz;       double rdry11 = -sx*cy*sz;       double rdry12 = +sx*sy;
+    double rdry20 = -cx*cy*cz;       double rdry21 = +cx*cy*sz;       double rdry22 = -cx*sy;
+    double rdrz00 = -cy*sz;          double rdrz01 = -cy*cz;
+    double rdrz10 = -sx*sy*sz+cx*cz; double rdrz11 = -sx*sy*cz-cx*sz;
+    double rdrz20 = +cx*sy*sz+sx*cz; double rdrz21 = +cx*sy*cz-sx*sz;
+
+    // loop variables
+    double X1p,Y1p,Z1p;
+    double X1c,Y1c,Z1c,X2c;
+    double X1cd,Y1cd,Z1cd;
+
+    assert(Xp.type() == DataType<float>::type);
+    double n=0;
+    // for all observations do
+    for (int i=0; i<sample.size(); i++)
+    {
+        // get 3d point in previous coordinate system
+        X1p = Xp.at<float>(0,sample.at(i));
+        Y1p = Xp.at<float>(1,sample.at(i));
+        Z1p = Xp.at<float>(2,sample.at(i));
+
+        // compute 3d point in current left coordinate system
+        X1c = r00*X1p+r01*Y1p+r02*Z1p+tx;
+        Y1c = r10*X1p+r11*Y1p+r12*Z1p+ty;
+        Z1c = r20*X1p+r21*Y1p+r22*Z1p+tz;
+    
+        // weighting
+        double weight = 1.0;
+        if (false);
+            //weight = 1.0/(fabs(p_observe[4*i+0]-param.calib.cu)/fabs(param.calib.cu) + 0.05);
+    
+        // compute 3d point in current right coordinate system
+        X2c = X1c-calib.base_line;
+
+        // for all paramters do
+        for (int j=0; j<6; j++)
+        {
+            // derivatives of 3d pt. in curr. left coordinates wrt. param j
+            switch (j)
+            {
+            case 0: X1cd = 0;
+                Y1cd = rdrx10*X1p+rdrx11*Y1p+rdrx12*Z1p;
+                Z1cd = rdrx20*X1p+rdrx21*Y1p+rdrx22*Z1p;
+                break;
+            case 1: X1cd = rdry00*X1p+rdry01*Y1p+rdry02*Z1p;
+                Y1cd = rdry10*X1p+rdry11*Y1p+rdry12*Z1p;
+                Z1cd = rdry20*X1p+rdry21*Y1p+rdry22*Z1p;
+                break;
+            case 2: X1cd = rdrz00*X1p+rdrz01*Y1p;
+                Y1cd = rdrz10*X1p+rdrz11*Y1p;
+                Z1cd = rdrz20*X1p+rdrz21*Y1p;
+                break;
+            case 3: X1cd = 1; Y1cd = 0; Z1cd = 0; break;
+            case 4: X1cd = 0; Y1cd = 1; Z1cd = 0; break;
+            case 5: X1cd = 0; Y1cd = 0; Z1cd = 1; break;
+            }
+            // set jacobian entries (project via K)
+            J.at<float>((4*i+0)*6+j,0) = weight*calib.f*(X1cd*Z1c-X1c*Z1cd)/(Z1c*Z1c); // left u'
+            J.at<float>((4*i+1)*6+j,0) = weight*calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // left v'
+            J.at<float>((4*i+2)*6+j,0) = weight*calib.f*(X1cd*Z1c-X2c*Z1cd)/(Z1c*Z1c); // right u'
+            J.at<float>((4*i+3)*6+j,0) = weight*calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // right v'
+        }
+        // set prediction (project via K)
+        x_predict.at<float>(0,i) = calib.f*X1c/Z1c+calib.cu; // left u
+        x_predict.at<float>(1,i) = calib.f*Y1c/Z1c+calib.cv; // left v
+        x_predict.at<float>(2,i) = calib.f*X2c/Z1c+calib.cu; // right u
+        x_predict.at<float>(3,i) = calib.f*Y1c/Z1c+calib.cv; // right v
+        cout << "x_predict:" << x_predict.col(i) << endl;
+        cout << "x_observe:" << x_observe.col(i) << endl;
+
+        // set residuals
+        residual.at<float>(4*i+0,0) = weight*(x_observe.at<float>(0,i)-x_predict.at<float>(0,i));
+        residual.at<float>(4*i+1,0) = weight*(x_observe.at<float>(1,i)-x_predict.at<float>(1,i));
+        residual.at<float>(4*i+2,0) = weight*(x_observe.at<float>(2,i)-x_predict.at<float>(2,i));
+        residual.at<float>(4*i+3,0) = weight*(x_observe.at<float>(3,i)-x_predict.at<float>(3,i));
+//        cout << "residual[0]:" << residual.at<float>(4*i+0,0) << endl;
+//        cout << "residual[1]:" << residual.at<float>(4*i+1,0) << endl;
+//        cout << "residual[2]:" << residual.at<float>(4*i+2,0) << endl;
+//        cout << "residual[3]:" << residual.at<float>(4*i+3,0) << endl;
+        n += 
+            residual.at<float>(4*i+0,0)*residual.at<float>(4*i+0,0)+
+            residual.at<float>(4*i+1,0)*residual.at<float>(4*i+1,0)+
+            residual.at<float>(4*i+2,0)*residual.at<float>(4*i+2,0)+
+            residual.at<float>(4*i+3,0)*residual.at<float>(4*i+3,0);
+    }
+    cout << "objective=" << n << endl;
+}
+
+// a single step of Gauss Newton optimization; I closely follow original StereoScan stuff here
+bool
+minimizeResiduals(const Mat& Xp, /*3d pcl from prev frame*/
+                  const Mat& x_observe /* observed pixels */,
+                  vector<double>& tr, /* current optimization vars values */
+                  Mat& x_predict,
+                  vector<int>& sample, 
+                  double step_size,
+                  double eps)
+{
+    int N = sample.size();
+    Mat J(4*N*6,1,DataType<float>::type), residual(4*N,1,DataType<float>::type);
+    computeResidualsAndJacobian(Xp,x_observe,tr,sample,residual,J,x_predict);
+    Mat A(6,6,DataType<float>::type), B(6,1,DataType<float>::type);
+    // fill matrices A and B
+    for (int32_t m=0; m<6; m++) {
+        for (int32_t n=0; n<6; n++) {
+            double a = 0;
+            for (int32_t i=0; i<4*(int32_t)sample.size(); i++) {
+                a += J.at<float>(i*6+m,0)*J.at<float>(i*6+n,0);
+            }
+            A.at<float>(m,n) = a;
+        }
+        double b = 0;
+        for (int32_t i=0; i<4*(int32_t)sample.size(); i++) {
+            b += J.at<float>(i*6+m,0)*(residual.at<float>(i,0));
+        }
+        B.at<float>(m,0) = b;
+    }
+    
+    // perform elimination
+    Mat p;
+    if (solve(A,B,p)) {
+        bool converged = true;
+        for (int32_t m=0; m<6; m++) {
+            tr[m] += step_size*p.at<float>(m,0);
+            if (fabs(p.at<float>(m,0))>eps)
+                converged = false;
+        }
+        return converged;
+    } else {
+        return false;
+    }
+}
+
+vector<int>
+getRandomSample(int N,int num)
+{
+  // init sample and totalset
+  vector<int> sample;
+  vector<int> totalset;
+  
+  // create vector containing all indices
+  for (int i=0; i<N; i++)
+    totalset.push_back(i);
+
+  // add num indices to current sample
+  sample.clear();
+  for (int i=0; i<num; i++) {
+    int j = rand()%totalset.size();
+    sample.push_back(totalset[j]);
+    totalset.erase(totalset.begin()+j);
+  }
+  // return sample
+  return sample;
+}
+
+vector<int>
+getInliers(const Mat& Xp, /* previously estimated 3d pcl 3xN */
+           const Mat& x_observe, /* observed pixels 4xN, 1st 2 rows left frames, last 2:right*/
+           vector<double> &tr, /* current R,t params */
+           double inlier_threshold)
+{
+    vector<int> all(Xp.cols);
+    for(int i=0; i<Xp.cols; ++i)
+        all.push_back(i);
+    int N = all.size();
+    Mat J(4*N*6,1,DataType<float>::type), residual(4*N,1,DataType<float>::type), x_predict(4,x_observe.cols,DataType<float>::type);
+    // extract observations and compute predictions
+    computeResidualsAndJacobian(Xp,x_observe,tr,all,residual,J,x_predict);
+    // compute inliers
+    vector<int> inliers;
+    for (int i=0; i<Xp.cols; i++)
+        if (pow(x_observe.at<float>(0,i)-x_predict.at<float>(0,i),2)+
+            pow(x_observe.at<float>(1,i)-x_predict.at<float>(1,i),2)+
+            pow(x_observe.at<float>(2,i)-x_predict.at<float>(2,i),2)+
+            pow(x_observe.at<float>(3,i)-x_predict.at<float>(3,i),2) <
+            inlier_threshold*inlier_threshold)
+            inliers.push_back(i);
+    return inliers;
+}
+
+void
+ransacMinimizeReprojError(const Mat& im1, const Mat& Xp, /* 3d pcl from prev frame */
+                          const Mat& x_observe, /* pixels that predict reprojection locations */
+                          Mat& x_predict,
+                          vector<int>& inliers /* output arg */,
+                          vector<double>& tr)
+{
+    BOOST_LOG_TRIVIAL(info) << "minimizing reprojection errors";
+    // just in case
+    assert(Xp.type() == DataType<float>::type);
+
+    int N=100, /* max RANSAC iterations */
+        model_size=3, /* number of points needed to estimate the model */
+        max_sup_size=0;
+    double max_sup_rms=DBL_MAX;
+    for(int k=0; k<N; ++k)
+    {
+        vector<int> sample = getRandomSample(Xp.cols,model_size);
+        cout << "sample:";
+        for (auto c : sample)
+            std::cout << c << ' ';
+        cout << endl;
+        vector<double> tr(6,0); /* initial parameter guess */
+        for (int i=0; i < 20 && !minimizeResiduals(Xp,x_observe,tr,x_predict,sample,1,1e-6); ++i)
+        {
+            Mat X_sample(3,model_size,DataType<float>::type),
+                x_predict_sample(4,model_size,DataType<float>::type),
+                x_observe_sample(4,model_size,DataType<float>::type);
+            for(int j=0; j<model_size; ++j)
+            {
+                x_predict_sample.at<float>(0,j) = x_predict.at<float>(0,sample[j]);
+                x_predict_sample.at<float>(1,j) = x_predict.at<float>(1,sample[j]);
+                x_observe_sample.at<float>(0,j) = x_observe.at<float>(0,sample[j]);
+                x_observe_sample.at<float>(1,j) = x_observe.at<float>(1,sample[j]);
+            }
+            save2(im1, x_predict_sample, x_observe_sample, (boost::format((dbgDir/"rs_%d.jpg").string())%i).str().c_str());
+        }
+    }
+    BOOST_LOG_TRIVIAL(info) << "max support set size=" << max_sup_size << " out of " << Xp.cols << " its RMS=" << max_sup_rms << endl;
+}
+
+void
+ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2, const MatrixXf& Xe,
+                  const MatrixXf& Xe_prev, Affine3f& Tb, vector<int>& inliers)
 {
     int N=100, model_size=3, max_sup_size=0;
     double max_sup_rms=DBL_MAX;
@@ -1039,12 +1325,18 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
     BOOST_LOG_TRIVIAL(info) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
 }
 
-// stereo odometry
 
+// stereo odometry
 vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
                  const boost::filesystem::path& dbg_dir)
 {
+    calib.f = P1.at<double>(0,0);
+    calib.cu= P1.at<double>(0,2);
+    calib.cv= P1.at<double>(1,2);
+    calib.base_line = abs(P2.at<double>(0,3))/calib.f;
+    cout << "f: " << calib.f << ",cu=" << calib.cu << ",cv=" << calib.cv << ",base_line=" << calib.base_line << endl;
+    dbgDir = dbg_dir;
     int MAX_FEATURE_NUM = 5000;
     HarrisBinnedFeatureDetector detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
@@ -1097,13 +1389,21 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
         match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
         BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
         save2blend(im1, im2, kp1, kp2, match_lr, (boost::format((dbg_dir/"lr_blend_%03d.jpg").string()) % iter_num).str().c_str());
-
 	cv::Mat
             x1(2, match_lr.size(), DataType<float>::type),
             x2(2, match_lr.size(), DataType<float>::type);
         collect_matches(kp1,kp2,match_lr,x1,x2);
         // each col is a 3d pt
-        X = triangulate_dlt(x1, x2, P1, P2);
+        //X = triangulate_dlt(x1, x2, P1, P2);
+        X.create(3,x1.cols,DataType<float>::type);
+        for(int i=0; i<x1.cols; ++i)
+        {
+            double d = max(x1.at<float>(0,i)-x2.at<float>(0,i),0.0001f);
+            X.at<float>(0,i) = (x1.at<float>(0,i)-calib.cu)*calib.base_line/d;
+            X.at<float>(1,i) = (x1.at<float>(1,i)-calib.cv)*calib.base_line/d;
+            X.at<float>(2,i) = calib.f*calib.base_line/d;
+        }
+
         assert(X.type()==DataType<float>::type);
         save1reproj(im1,X,x1,P1,(boost::format((dbg_dir/"tri_l%03d.jpg").string()) % iter_num).str().c_str());
         save1reproj(im1,X,x2,P2,(boost::format((dbg_dir/"tri_r%03d.jpg").string()) % iter_num).str().c_str());
@@ -1133,21 +1433,26 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
             BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " << circ_match.size();
             poses.push_back(Affine3f::Identity());
             continue;
-        } 
+        }
         BOOST_LOG_TRIVIAL(info) << circ_match.size() << " points in circular match";
         MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
         mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
         save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
               (boost::format((dbg_dir/"circ_match_%03d.jpg").string()) % iter_num).str().c_str());
-        BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
         Affine3f T;
         MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
         vector<int> inliers;
-        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
-        poses.push_back(T);
-        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
-        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
-                    (boost::format((dbg_dir/"reproj_%03d.jpg").string()) % iter_num).str().c_str());
+//        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
+        vector<double> tr;
+        Mat x_observe;
+        vconcat(x1,x2,x_observe);
+        assert(x_observe.rows == 4);
+        Mat x_predict(4,x_observe.cols,DataType<float>::type);
+        ransacMinimizeReprojError(im1, X_prev, x_observe, x_predict, inliers, tr);
+//        poses.push_back(T);
+//        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
+//        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
+//                    (boost::format((dbg_dir/"reproj_%03d.jpg").string()) % iter_num).str().c_str());
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;

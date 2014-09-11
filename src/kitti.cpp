@@ -80,7 +80,7 @@ int main(int argc, char** argv)
 {
     if (argc<3)
     {
-        cout << "usage: demo result_sha n1 n2 ..." << endl;
+        cout << "usage: kitti sha seq begin end ..." << endl;
         exit(1);
     }
 //    init_log();
