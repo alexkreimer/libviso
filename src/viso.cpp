@@ -1039,13 +1039,31 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
     BOOST_LOG_TRIVIAL(info) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
 }
 
+Mat
+triangulate_rectified(const Mat& x, /* coordinates of matched interest points in image planes */
+                      double f, /* focal distance in pixels*/
+                      double base, /* base line distance*/
+                      double c1u, /* principal point x */
+                      double c1v  /* principal point y */)
+{
+    Mat X(3,x.cols,DataType<float>::type);
+    assert(x.type() == DataType<float>::type);
+    for(int i=0; i<x.cols; ++i)
+    {
+        float d = max(x.at<float>(0,i)-x.at<float>(2,i), 1e-4f);
+        X.at<float>(0,i) = base*(x.at<float>(0,i)-c1u)/d;
+        X.at<float>(1,i) = base*(x.at<float>(1,i)-c1v)/d;
+        X.at<float>(2,i) = f*base/d;
+    }
+    return X;
+}
 // stereo odometry
 
 vector<Affine3f>
 sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
                  const boost::filesystem::path& dbg_dir)
 {
-    int MAX_FEATURE_NUM = 5000;
+    int MAX_FEATURE_NUM = 1200;
     HarrisBinnedFeatureDetector detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
     StereoImageGenerator::result_type stereo_pair;
@@ -1103,10 +1121,13 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
             x2(2, match_lr.size(), DataType<float>::type);
         collect_matches(kp1,kp2,match_lr,x1,x2);
         // each col is a 3d pt
-        X = triangulate_dlt(x1, x2, P1, P2);
+        //X = triangulate_dlt(x1, x2, P1, P2);
+        double f = P1.at<double>(0,0), base = abs(P2.at<double>(0,3)),
+            c1u = P1.at<double>(0,2), c1v = P1.at<double>(1,2);
+        X = triangulate_rectified(x1, x2, f, base, c1u, c1v);
         assert(X.type()==DataType<float>::type);
-        save1reproj(im1,X,x1,P1,(boost::format((dbg_dir/"tri_l%03d.jpg").string()) % iter_num).str().c_str());
-        save1reproj(im1,X,x2,P2,(boost::format((dbg_dir/"tri_r%03d.jpg").string()) % iter_num).str().c_str());
+//        save1reproj(im1,X,x1,P1,(boost::format((dbg_dir/"tri_l%03d.jpg").string()) % iter_num).str().c_str());
+//        save1reproj(im1,X,x2,P2,(boost::format((dbg_dir/"tri_r%03d.jpg").string()) % iter_num).str().c_str());
         if (first)
         {
             first = false;
@@ -1220,3 +1241,98 @@ calibratedSFM(const Mat& K, MonoImageGenerator& images)
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
 }
+
+void
+computeResidualsAndJacobian(const Mat& X, vector<double> &tr,vector<int> &active) {
+
+  // extract motion parameters
+  double rx = tr[0]; double ry = tr[1]; double rz = tr[2];
+  double tx = tr[3]; double ty = tr[4]; double tz = tr[5];
+
+  // precompute sine/cosine
+  double sx = sin(rx); double cx = cos(rx); double sy = sin(ry);
+  double cy = cos(ry); double sz = sin(rz); double cz = cos(rz);
+
+  // compute rotation matrix and derivatives
+  double r00    = +cy*cz;          double r01    = -cy*sz;          double r02    = +sy;
+  double r10    = +sx*sy*cz+cx*sz; double r11    = -sx*sy*sz+cx*cz; double r12    = -sx*cy;
+  double r20    = -cx*sy*cz+sx*sz; double r21    = +cx*sy*sz+sx*cz; double r22    = +cx*cy;
+  double rdrx10 = +cx*sy*cz-sx*sz; double rdrx11 = -cx*sy*sz-sx*cz; double rdrx12 = -cx*cy;
+  double rdrx20 = +sx*sy*cz+cx*sz; double rdrx21 = -sx*sy*sz+cx*cz; double rdrx22 = -sx*cy;
+  double rdry00 = -sy*cz;          double rdry01 = +sy*sz;          double rdry02 = +cy;
+  double rdry10 = +sx*cy*cz;       double rdry11 = -sx*cy*sz;       double rdry12 = +sx*sy;
+  double rdry20 = -cx*cy*cz;       double rdry21 = +cx*cy*sz;       double rdry22 = -cx*sy;
+  double rdrz00 = -cy*sz;          double rdrz01 = -cy*cz;
+  double rdrz10 = -sx*sy*sz+cx*cz; double rdrz11 = -sx*sy*cz-cx*sz;
+  double rdrz20 = +cx*sy*sz+sx*cz; double rdrz21 = +cx*sy*cz-sx*sz;
+
+  // loop variables
+  double X1p,Y1p,Z1p;
+  double X1c,Y1c,Z1c,X2c;
+  double X1cd,Y1cd,Z1cd;
+
+  // for all observations do
+  for (int32_t i=0; i<(int32_t)active.size(); i++)
+  {
+
+      // get 3d point in previous coordinate system
+      X1p = X.at<float>(0,active[i]);
+      Y1p = X.at<float>(1,active[i]);
+      Z1p = X.at<float>(2,active[i]);
+
+      // compute 3d point in current left coordinate system
+      X1c = r00*X1p+r01*Y1p+r02*Z1p+tx;
+      Y1c = r10*X1p+r11*Y1p+r12*Z1p+ty;
+      Z1c = r20*X1p+r21*Y1p+r22*Z1p+tz;
+    
+      // weighting
+      double weight = 1.0;
+//      if (param.reweighting)
+//          weight = 1.0/(fabs(p_observe[4*i+0]-param.calib.cu)/fabs(param.calib.cu) + 0.05);
+    
+      // compute 3d point in current right coordinate system
+      X2c = X1c-param.base;
+
+      // for all paramters do
+      for (int32_t j=0; j<6; j++) {
+          
+          // derivatives of 3d pt. in curr. left coordinates wrt. param j
+          switch (j) {
+          case 0: X1cd = 0;
+              Y1cd = rdrx10*X1p+rdrx11*Y1p+rdrx12*Z1p;
+              Z1cd = rdrx20*X1p+rdrx21*Y1p+rdrx22*Z1p;
+              break;
+          case 1: X1cd = rdry00*X1p+rdry01*Y1p+rdry02*Z1p;
+              Y1cd = rdry10*X1p+rdry11*Y1p+rdry12*Z1p;
+              Z1cd = rdry20*X1p+rdry21*Y1p+rdry22*Z1p;
+              break;
+          case 2: X1cd = rdrz00*X1p+rdrz01*Y1p;
+              Y1cd = rdrz10*X1p+rdrz11*Y1p;
+              Z1cd = rdrz20*X1p+rdrz21*Y1p;
+              break;
+          case 3: X1cd = 1; Y1cd = 0; Z1cd = 0; break;
+          case 4: X1cd = 0; Y1cd = 1; Z1cd = 0; break;
+          case 5: X1cd = 0; Y1cd = 0; Z1cd = 1; break;
+          }
+
+      // set jacobian entries (project via K)
+      J[(4*i+0)*6+j] = weight*param.calib.f*(X1cd*Z1c-X1c*Z1cd)/(Z1c*Z1c); // left u'
+      J[(4*i+1)*6+j] = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // left v'
+      J[(4*i+2)*6+j] = weight*param.calib.f*(X1cd*Z1c-X2c*Z1cd)/(Z1c*Z1c); // right u'
+      J[(4*i+3)*6+j] = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // right v'
+    }
+
+    // set prediction (project via K)
+    p_predict[4*i+0] = param.calib.f*X1c/Z1c+param.calib.cu; // left u
+    p_predict[4*i+1] = param.calib.f*Y1c/Z1c+param.calib.cv; // left v
+    p_predict[4*i+2] = param.calib.f*X2c/Z1c+param.calib.cu; // right u
+    p_predict[4*i+3] = param.calib.f*Y1c/Z1c+param.calib.cv; // right v
+    
+    // set residuals
+    p_residual[4*i+0] = weight*(p_observe[4*i+0]-p_predict[4*i+0]);
+    p_residual[4*i+1] = weight*(p_observe[4*i+1]-p_predict[4*i+1]);
+    p_residual[4*i+2] = weight*(p_observe[4*i+2]-p_predict[4*i+2]);
+    p_residual[4*i+3] = weight*(p_observe[4*i+3]-p_predict[4*i+3]);
+  }
+}
+

@@ -7,6 +7,7 @@
 
 using cv::Mat_;
 using cv::SVD;
+using cv::DataType;
 
 template<class T>
 Mat rms(const Mat &X1, const Mat &X2)
@@ -163,6 +164,29 @@ triangulate_dlt(const Mat &x1, const Mat &x2, const Mat &P1,const Mat &P2)
 	X.at<float>(0,i) = (float)svd.vt.at<double>(3,0)/d;
 	X.at<float>(1,i) = (float)svd.vt.at<double>(3,1)/d;
 	X.at<float>(2,i) = (float)svd.vt.at<double>(3,2)/d;
+    }
+    return X;
+}
+
+
+Mat
+triangulate_rectified(const Mat& x1, /* pixel coordinates in the 1st image */
+                      const Mat& x2, /* pixel coordinates in the 2nd image */
+                      double f, /* focal distance*/
+                      double base, /* camera base line distance*/
+                      double c1u, /*center of projections in the 1st image */
+                      double c1v /* center of projection in the 2nd image */)
+{
+    assert(x1.cols == x2.cols);
+    assert(x1.type() == DataType<float>::type);
+    assert(x2.type() == DataType<float>::type);
+    Mat X(3, x1.cols, DataType<float>::type);
+    for (int i=0; i<X.cols; ++i)
+    {
+        double d = max(x1.at<float>(0,i)-x2.at<float>(0,i),0.0001f);
+        X.at<float>(0,i) = (x1.at<float>(0,i)-c1u)*base/d;
+        X.at<float>(1,i) = (x1.at<float>(1,i)-c1v)*base/d;
+        X.at<float>(2,i) = f*base/d;
     }
     return X;
 }

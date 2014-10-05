@@ -80,46 +80,54 @@ int main(int argc, char** argv)
 {
     if (argc<3)
     {
-        cout << "usage: demo result_sha n1 n2 ..." << endl;
+        cout << "usage: demo result_sha seq_name begin end" << endl;
         exit(1);
+    }
+    int begin = 0, end = INT_MAX;
+    if (argc > 3)
+    {
+        begin = std::stoi(argv[3]);
+    }
+    if (argc > 4)
+    {
+        end = std::stoi(argv[4]);
     }
 //    init_log();
     char *result_sha = argv[1], *KITTI_HOME  = std::getenv("KITTI_HOME");
     assert(KITTI_HOME);
     fs::path seq_base = fs::path(KITTI_HOME) / "sequences";
-    for(int j=2; argv[j]; ++j)
+    string seq_name(argv[2]);
+    fs::path result_dir = fs::path(KITTI_HOME) / "results" / seq_name / result_sha;
+    fs::create_directories(result_dir);
+    BOOST_LOG_TRIVIAL(info) << "Processing sequence: " << seq_name;
+    Mat P1(3,4,cv::DataType<double>::type), P2(3,4,cv::DataType<double>::type);
+    string calib_file_name = (seq_base/seq_name/"calib.txt").string();
+    BOOST_LOG_TRIVIAL(info) << "Read camera calibration info from: " << calib_file_name;
+    bool res = loadCalib(calib_file_name, P1, P2);
+    assert(res);
+    P2.at<double>(0,3) = P2.at<double>(0,3)/P2.at<double>(0,0);
+    BOOST_LOG_TRIVIAL(info) << "T:" << P2.at<double>(0,3);
+    StereoImageGenerator images(StereoImageGenerator::string_pair(
+                                    (seq_base / seq_name / "image_0" / "%06d.png").string(),
+                                    (seq_base / seq_name / "image_1" / "%06d.png").string()),begin,end);
+    vector<Affine3f> poses = sequenceOdometry(P1, P2, images, result_dir);
+    vector<Affine3f> kitti_poses;
+    Affine3f Tk = Affine3f::Identity();
+    int i=0;
+    for(auto &T: poses)
     {
-        string seq_name(argv[j]);
-        fs::path result_dir = fs::path(KITTI_HOME) / "results" / seq_name / result_sha;
-        fs::create_directories(result_dir);
-        BOOST_LOG_TRIVIAL(info) << "Processing sequence: " << seq_name;
-        Mat P1(3,4,cv::DataType<double>::type), P2(3,4,cv::DataType<double>::type);
-        string calib_file_name = (seq_base/seq_name/"calib.txt").string();
-        BOOST_LOG_TRIVIAL(info) << "Read camera calibration info from: " << calib_file_name;
-        bool res = loadCalib(calib_file_name, P1, P2);
-        assert(res);
-        StereoImageGenerator images(StereoImageGenerator::string_pair(
-                                        (seq_base / seq_name / "image_0" / "%06d.png").string(),
-                                        (seq_base / seq_name / "image_1" / "%06d.png").string()),0,300);
-        vector<Affine3f> poses = sequenceOdometry(P1, P2, images, result_dir);
-        vector<Affine3f> kitti_poses;
-        Affine3f Tk = Affine3f::Identity();
-        int i=0;
-        for(auto &T: poses)
-        {
-            if (Tk.inverse().matrix().allFinite())
-                kitti_poses.push_back(Tk.inverse());
-            else {
-                BOOST_LOG_TRIVIAL(info) << "estimation failed" << endl;
-                kitti_poses.push_back(Affine3f::Identity());
-            }
-            Tk = T*Tk;
+        if (Tk.inverse().matrix().allFinite())
+            kitti_poses.push_back(Tk.inverse());
+        else {
+            BOOST_LOG_TRIVIAL(info) << "estimation failed" << endl;
+            kitti_poses.push_back(Affine3f::Identity());
         }
-        fs::path poses_dir(result_dir/"data");
-        create_directories(poses_dir);
-        string poses_file_name((poses_dir/(seq_name+".txt")).string());
-        BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
-        savePoses(poses_file_name, kitti_poses);
+        Tk = T*Tk;
     }
+    fs::path poses_dir(result_dir/"data");
+    create_directories(poses_dir);
+    string poses_file_name((poses_dir/(seq_name+".txt")).string());
+    BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
+    savePoses(poses_file_name, kitti_poses);
     return 0;
 }

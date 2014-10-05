@@ -77,6 +77,14 @@ Mat P_from_KRt(const Mat &K, const Mat &R, const Mat &t);
 Mat
 triangulate_dlt(const Mat &x1, const Mat &x2, const Mat &P1,const Mat &P2);
 
+Mat
+triangulate_rectified(const Mat& x1, /* pixel coordinates in the 1st image */
+                      const Mat& x2, /* pixel coordinates in the 2nd image */
+                      double f, /* focal distance*/
+                      double base, /* camera base line distance*/
+                      double c1u, /*center of projections in the 1st image */
+                      double c1v /* center of projection in the 2nd image */);
+
 /* central projection */
 class Camera {
 public:
