@@ -1,11 +1,11 @@
 libviso: Visual Odometry library
 ================================
 
-Edit src/CMakeLists.txt and set opencv and eigen path's. You can download eigen here http://eigen.tuxfamily.org/.  Now do this to build:
+You will need to download kitti dataset if you would like to test the code: here: http://www.cvlibs.net/download.php?file=data_odometry_gray.zip
 
-Download kitti dataset here: http://www.cvlibs.net/download.php?file=data_odometry_gray.zip
+Edit src/CMakeLists.txt and set opencv and eigen path's. You can download eigen here http://eigen.tuxfamily.org/.  
 
-Download ground truth here: http://www.cvlibs.net/download.php?file=data_odometry_poses.zip
+Build the code:
 
 mkdir debug
 cd debug
