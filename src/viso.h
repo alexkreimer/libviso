@@ -55,7 +55,31 @@ typedef vector<Point2f> Points2f;
 typedef Mat Descriptors;
 typedef pair<Mat,Mat> image_pair;
 
-class StereoImageGenerator {
+struct param
+{
+param() : ransac_iter(50), inlier_threshold(2), save_debug(true), thresh(1e-4) {}
+    double base;
+    int ransac_iter;
+    double inlier_threshold;
+    double thresh; /* gradient norm threshold */
+    bool save_debug;
+    struct
+    {
+        double f;
+        double cu;
+        double cv;
+    } calib;
+};
+
+bool
+ransac_minimize_reproj(const Mat& X,const Mat& observe,vector<double>& best_tr,vector<int>& best_inliers,const struct param& param);
+
+bool
+minimize_reproj(const Mat& X, const Mat& observe, vector<double>& tr, const struct param& param,
+                const vector<int>& active);
+
+class StereoImageGenerator
+{
 public:
     typedef boost::optional<image_pair> result_type;
     typedef pair<string, string> string_pair;
@@ -111,8 +135,8 @@ findConstrainedCorrespondences(const Mat& F, const KeyPoints& kp1,
 			       const Mat& d2, Matches& matches,
 			       double eps, double ratio);
 
-vector<Affine3f>
-sequenceOdometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images, const boost::filesystem::path& dbg_dir);
+vector<Mat>
+sequence_odometry(const Mat& p1, const Mat& p2, StereoImageGenerator& images, const boost::filesystem::path& dbg_dir);
 
 
 void
@@ -134,5 +158,7 @@ save2(const cv::Mat& m1, const cv::Mat& m2, const KeyPoints& kp1,
       int lim=50);
 void
 calibratedSFM(const Mat& K, MonoImageGenerator& images);
+
+void tr2mat(vector<double> tr,Mat& Tr);
 
 #endif

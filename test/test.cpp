@@ -1,11 +1,11 @@
 #define BOOST_TEST_MODULE viso_tests
 #include <boost/test/unit_test.hpp>
 #include <boost/test/floating_point_comparison.hpp>
+#include "../src/viso.h"
+#include "../src/estimation.h"
+#include "../src/mvg.h"
 
-#include "src/viso.h"
-#include "src/estimation.h"
-#include "src/mvg.h"
-
+#if 0
 BOOST_AUTO_TEST_CASE(test_triangulate_dlt)
 {
     Mat P1 = (Mat_<double>(3,4) << 
@@ -23,10 +23,6 @@ BOOST_AUTO_TEST_CASE(test_triangulate_dlt)
     //cout << "P2=" << _str<double>(P2) << endl;
     
     int N = 1000;
-    Mat X(3,N,DataType<float>::type);
-    for(int i=0; i<1000; ++i)
-    {
-    }
     Mat X = (Mat_<float>(4,1) << 0,0,1,1);
     //cout << "X=" << _str<float>(X) << endl;
     // project X
@@ -41,6 +37,136 @@ BOOST_AUTO_TEST_CASE(test_triangulate_dlt)
     BOOST_CHECK_SMALL(.0d, 1e-2);
 
 }
+
+template<typename T>
+ostream& operator<< (ostream& out, const vector<T> v) {
+    int last = v.size() - 1;
+    out << "[";
+    for(int i = 0; i < last; i++)
+        out << v[i] << ", ";
+    out << v[last] << "]";
+    return out;
+}
+
+BOOST_AUTO_TEST_CASE(test_nl_rigid_motion)
+{
+    using cv::Mat;
+    using cv::RNG;
+    using namespace std;
+    Mat P1 = (Mat_<float>(3,4) << 
+              7.188560000000e+02, 0.000000000000e+00, 6.071928000000e+02,
+              0.000000000000e+00, 0.000000000000e+00, 7.188560000000e+02,
+              1.852157000000e+02, 0.000000000000e+00, 0.000000000000e+00,
+              0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00);
+    Mat P2 = (Mat_<float>(3,4) <<
+              7.188560000000e+02, 0.000000000000e+00, 6.071928000000e+02, 
+              -3.861448000000e+02, 0.000000000000e+00, 7.188560000000e+02,
+              1.852157000000e+02, 0.000000000000e+00, 0.000000000000e+00,
+              0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00);
+    struct param p;
+    p.base = abs(P2.at<float>(0,3));
+    p.calib.f = P2.at<float>(0,0);
+    p.calib.cu = P2.at<float>(0,2);
+    p.calib.cv = P2.at<float>(1,2);
+    cout << "stereo rig params: base=" << p.base << ", focal=" << p.calib.f 
+         << ", principal point=(" <<p.calib.cu << "," << p.calib.cv << ");"
+         << endl;
+    int num_pts = 10, a=0, b=1000;
+    cout << "number of points: " << num_pts << endl;
+    Mat X(3,num_pts,cv::DataType<float>::type), Xtr(3,num_pts,cv::DataType<float>::type);
+    RNG rng;
+    for (int i=0; i<num_pts; ++i)
+    {
+        X.at<float>(0,i) = rng.uniform(a,b);
+        X.at<float>(1,i) = rng.uniform(a,b);
+        X.at<float>(2,i) = rng.uniform(a,b);
+    }
+    vector<double> tr0(6,0.0);
+    tr0[3] = 1;
+    cout << "transformation vector: " << tr0 << endl;
+    Mat Tr(4,4,cv::DataType<float>::type);
+    tr2mat(tr0, Tr);
+    cout << "transformation matrix: " << endl << Tr << endl;
+    Xtr = h2e<float>(Tr*e2h<float>(X));
+    Mat x1 = h2e<float>(P1*e2h<float>(Xtr)),
+        x2 = h2e<float>(P2*e2h<float>(Xtr));
+    Mat x(4,num_pts,cv::DataType<float>::type);
+    for (int i=0; i<num_pts; ++i)
+    {
+        x.at<float>(0,i) = x1.at<float>(0,i);
+        x.at<float>(1,i) = x1.at<float>(1,i);
+        x.at<float>(2,i) = x2.at<float>(0,i);
+        x.at<float>(3,i) = x2.at<float>(1,i);
+    }
+    vector<int> active(num_pts);
+    vector<double> tr(6,0.0);
+    for(int i=0;i<num_pts;++i) active[i] = i;
+    minimize_reproj(X,x,tr,p,active);
+    double err=.0f;
+    cout << "tr:";
+    for(int i=0;i<tr.size();++i)
+    {
+        cout << tr[i] << " ";
+        err += abs(tr[i]-tr0[i]);
+    }
+    
+    BOOST_CHECK_SMALL(err, 1e-4);
+}
+#endif
+void read_data(Mat& X, Mat& observe)
+{
+    FILE *fp = fopen("/home/kreimer/data.csv", "r");
+    if (!fp) {
+        perror("fopen");
+        exit(0);
+    }
+    int num_pts;
+    int n = fscanf(fp,"%d\n",&num_pts);
+    if (n!=1) {
+        perror("fscanf");
+        exit(0);
+    }
+    X.create(3,num_pts,cv::DataType<double>::type);
+    observe.create(4,num_pts,cv::DataType<double>::type);
+    printf("reading %d points\n",num_pts);
+    for(int i=0;i<num_pts; ++i)
+    {
+        double nop;
+        n = fscanf(fp, "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf\n",
+                   &nop, &nop, &nop, &nop,
+                   &observe.at<double>(0,i), &observe.at<double>(1,i),
+                   &observe.at<double>(2,i), &observe.at<double>(3,i),
+                   &X.at<double>(0,i), &X.at<double>(1,i), &X.at<double>(2,i));
+        if (n<8) {
+            printf("cound't read all data points");
+            exit(0);
+        }
+        if (0)
+            printf("%f %f %f %f %f %f %f\n",
+                   observe.at<double>(0,i), observe.at<double>(1,i),
+                   observe.at<double>(2,i), observe.at<double>(3,i),
+                   X.at<double>(0,i), X.at<double>(1,i), X.at<double>(2,i));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_nl_rigid_motion1)
+{
+    using cv::Mat;
+    using cv::RNG;
+    using namespace std;
+    struct param p;
+    p.base = .5707;
+    p.calib.f = 645.24;
+    p.calib.cu = 635.96;
+    p.calib.cv = 194.13;
+    Mat X,observe;
+    read_data(X,observe);
+    vector<double> tr(6,0.0);
+    vector<int> inliers;
+    BOOST_REQUIRE_EQUAL(ransac_minimize_reproj(X,observe,tr,inliers,p),true);
+    printf("tr: %g %g %g %g %g %g\n",tr[0],tr[1],tr[2],tr[3],tr[4],tr[5]);
+}
+
 /*
 BOOST_AUTO_TEST_CASE(test_solveRigidMotion)
 {

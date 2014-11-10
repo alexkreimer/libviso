@@ -36,7 +36,7 @@ loadIntrinsics(const string& file_name, Mat& p1)
   fclose(fp);
   return true;
 }
-
+#if 0
 void init_log()
 {
     logging::add_file_log
@@ -49,7 +49,7 @@ void init_log()
     );
     logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::debug);
 }
-
+#endif
 int
 main(int argc, char** argv)
 {

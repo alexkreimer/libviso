@@ -47,16 +47,16 @@ loadCalib(const string& file_name, Mat& p1, Mat& p2)
 
 
 bool
-savePoses(const string& file_name, const vector<Affine3f>& poses) {
+savePoses(const string& file_name, const vector<Mat>& poses) {
     FILE *fp = fopen(file_name.c_str(),"w+");
     if (!fp)
         false;
     for (auto &pose: poses)
     {
         int t=fprintf(fp, "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf\n",
-                      pose(0,0), pose(0,1), pose(0,2), pose(0,3),
-                      pose(1,0), pose(1,1), pose(1,2), pose(1,3),
-                      pose(2,0), pose(2,1), pose(2,2), pose(2,3));
+                      pose.at<double>(0,0), pose.at<double>(0,1), pose.at<double>(0,2), pose.at<double>(0,3),
+                      pose.at<double>(1,0), pose.at<double>(1,1), pose.at<double>(1,2), pose.at<double>(1,3),
+                      pose.at<double>(2,0), pose.at<double>(2,1), pose.at<double>(2,2), pose.at<double>(2,3));
         assert(t>0);
     }
     fclose(fp);
@@ -105,29 +105,14 @@ int main(int argc, char** argv)
     BOOST_LOG_TRIVIAL(info) << "Read camera calibration info from: " << calib_file_name;
     bool res = loadCalib(calib_file_name, P1, P2);
     assert(res);
-    P2.at<double>(0,3) = P2.at<double>(0,3)/P2.at<double>(0,0);
-    BOOST_LOG_TRIVIAL(info) << "T:" << P2.at<double>(0,3);
     StereoImageGenerator images(StereoImageGenerator::string_pair(
                                     (seq_base / seq_name / "image_0" / "%06d.png").string(),
                                     (seq_base / seq_name / "image_1" / "%06d.png").string()),begin,end);
-    vector<Affine3f> poses = sequenceOdometry(P1, P2, images, result_dir);
-    vector<Affine3f> kitti_poses;
-    Affine3f Tk = Affine3f::Identity();
-    int i=0;
-    for(auto &T: poses)
-    {
-        if (Tk.inverse().matrix().allFinite())
-            kitti_poses.push_back(Tk.inverse());
-        else {
-            BOOST_LOG_TRIVIAL(info) << "estimation failed" << endl;
-            kitti_poses.push_back(Affine3f::Identity());
-        }
-        Tk = T*Tk;
-    }
+    vector<Mat> poses = sequence_odometry(P1, P2, images, result_dir);
     fs::path poses_dir(result_dir/"data");
     create_directories(poses_dir);
     string poses_file_name((poses_dir/(seq_name+".txt")).string());
     BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
-    savePoses(poses_file_name, kitti_poses);
+    savePoses(poses_file_name, poses);
     return 0;
 }

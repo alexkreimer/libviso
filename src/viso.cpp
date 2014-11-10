@@ -73,6 +73,64 @@ struct MatchParams
                     ratio_2nd_best(.9), allow_ann(true), max_neighbors(250),
                     radius(80) {}
 };
+#include <random>
+#include <vector>
+
+double GetUniform()
+{
+    static std::default_random_engine re;
+    static std::uniform_real_distribution<double> Dist(0,1);
+    return Dist(re);
+}
+
+// John D. Cook, http://stackoverflow.com/a/311716/15485
+void
+randomsample(int n, int N, std::vector<int> & samples)
+{
+    int t = 0; // total input records dealt with
+    int m = 0; // number of items selected so far
+    double u;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0, 1);
+    while (m < n)
+    {
+        u = dis(gen);
+
+        if ((N - t)*u >= n - m) {
+            t++;
+        } else {
+            samples[m] = t;
+            t++; m++;
+        }
+    }
+}
+
+void
+tr2mat(vector<double> tr,Mat& Tr)
+{
+    // extract parameters
+    double rx = tr[0];
+    double ry = tr[1];
+    double rz = tr[2];
+    double tx = tr[3];
+    double ty = tr[4];
+    double tz = tr[5];
+    
+    // precompute sine/cosine
+    double sx = sin(rx);
+    double cx = cos(rx);
+    double sy = sin(ry);
+    double cy = cos(ry);
+    double sz = sin(rz);
+    double cz = cos(rz);
+    
+    // compute transformation
+    Tr.at<double>(0,0) = +cy*cz; Tr.at<double>(0,1) = -cy*sz; Tr.at<double>(0,2) = +sy; Tr.at<double>(0,3) = tx;
+    Tr.at<double>(1,0) = +sx*sy*cz+cx*sz; Tr.at<double>(1,1) = -sx*sy*sz+cx*cz; Tr.at<double>(1,2) = -sx*cy; Tr.at<double>(1,3) = ty;
+    Tr.at<double>(2,0) = -cx*sy*cz+sx*sz; Tr.at<double>(2,1) = +cx*sy*sz+sx*cz; Tr.at<double>(2,2) = +cx*cy; Tr.at<double>(2,3) = tz;
+    Tr.at<double>(3,0) = 0;               Tr.at<double>(3,1) = 0;               Tr.at<double>(3,2) = 0;      Tr.at<double>(3,3) = 1;
+}
 
 MatrixXf
 get_inl(const MatrixXf& X, const vector<int>& inl)
@@ -145,6 +203,7 @@ radiusSearch(cvflann::Index<cvflann::L1<float>>& index, Mat& query_points,
 }
 
 
+/* do search for features that match in a circle */
 void
 match_circle(const Matches& match_lr, const Matches& match_lr_prev,
              const Matches& match11, const Matches& match22,
@@ -235,9 +294,9 @@ drawPoints(Mat& im, const MatrixXf& x, const Scalar& color, int thickness, int l
 void
 drawPoints(Mat& im, const Mat& x, const Scalar& color, int thickness, int linetype)
 {
-    assert(x.type() == DataType<float>::type);
+    assert(x.type() == DataType<double>::type);
     for(int i=0; i<x.cols; ++i)
-        circle(im, cv::Point(x.at<float>(0,i), x.at<float>(1,i)), thickness, color, linetype);
+        circle(im, cv::Point(x.at<double>(0,i), x.at<double>(1,i)), thickness, color, linetype);
 }
 
 void
@@ -267,10 +326,10 @@ projectPoints(const MatrixXf& X, const MatrixXf P, MatrixXf& x)
 Mat
 projectPoints(const Mat& X, const Mat& P)
 {
-    assert(X.type()==DataType<float>::type);
-    Mat Xh = e2h<float>(X), Pf;
-    P.convertTo(Pf, DataType<float>::type);
-    return h2e<float>(Pf*Xh);
+    assert(X.type()==DataType<double>::type);
+    Mat Xh = e2h<double>(X), Pf;
+    P.convertTo(Pf, DataType<double>::type);
+    return h2e<double>(Pf*Xh);
 }
 
 void
@@ -427,13 +486,30 @@ void
 collect_matches(const KeyPoints& kp1, const KeyPoints &kp2,
                 const Matches &match, Mat &p1, Mat &p2)
 {
+    p1.create(2,match.size(),DataType<double>::type);
+    p2.create(2,match.size(),DataType<double>::type);
     for(int i=0; i<match.size(); ++i)
     {
         int i1 = match.at(i)[0], i2 = match.at(i)[1];
-        p1.at<float>(0,i) = kp1.at(i1).pt.x;
-        p1.at<float>(1,i) = kp1.at(i1).pt.y;
-        p2.at<float>(0,i) = kp2.at(i2).pt.x;
-        p2.at<float>(1,i) = kp2.at(i2).pt.y;
+        p1.at<double>(0,i) = kp1.at(i1).pt.x;
+        p1.at<double>(1,i) = kp1.at(i1).pt.y;
+        p2.at<double>(0,i) = kp2.at(i2).pt.x;
+        p2.at<double>(1,i) = kp2.at(i2).pt.y;
+    }
+}
+
+void
+collect_matches(const KeyPoints& kp1, const KeyPoints &kp2,
+                const Matches &match, Mat &x)
+{
+    x.create(4,match.size(),DataType<double>::type);
+    for(int i=0; i<match.size(); ++i)
+    {
+        int i1 = match.at(i)[0], i2 = match.at(i)[1];
+        x.at<double>(0,i) = kp1.at(i1).pt.x;
+        x.at<double>(1,i) = kp1.at(i1).pt.y;
+        x.at<double>(2,i) = kp2.at(i2).pt.x;
+        x.at<double>(3,i) = kp2.at(i2).pt.y;
     }
 }
 
@@ -489,6 +565,25 @@ save2blend(const cv::Mat& im1, const cv::Mat& im2, const KeyPoints& kp1,
             p2 = kp2[match.at(i)[1]].pt;
         circle(im, p1, 1, Scalar(0,255,0), -1);
         line(im, p1, p2, Scalar(255,0,0));
+    }
+    imwrite(file_name, im);
+}
+
+void
+save2blend(const cv::Mat& im1, const cv::Mat& im2, const Mat& x,
+           const string& file_name, int lim=INT_MAX)
+{
+    cv::Mat blend, im;
+    addWeighted(im1, .5, im2, .5, 0.0, blend);
+    cvtColor(blend, im, CV_GRAY2RGB);
+    for(int i=0;i<x.cols && i<lim; ++i)
+    {
+        Point
+            p1(x.at<double>(0,i),x.at<double>(1,i)),
+            p2(x.at<double>(2,i),x.at<double>(3,i));
+        circle(im,p1,1,Scalar(0,255,0),-1);
+        circle(im,p2,1,Scalar(0,0,255),-1);
+        line(im,p1,p2,Scalar(255,0,0));
     }
     imwrite(file_name, im);
 }
@@ -1039,30 +1134,41 @@ ransacRigidMotion(const MatrixXf& P1, const MatrixXf& P2,
     BOOST_LOG_TRIVIAL(info) <<"max support set size=" << max_sup_size << " out of " << Xe.cols() << " its RMS=" << max_sup_rms << endl;
 }
 
-Mat
-triangulate_rectified(const Mat& x, /* coordinates of matched interest points in image planes */
+template<typename T> Mat
+triangulate_rectified(const Mat& x, /* coords of matched interest points in image planes */
                       double f, /* focal distance in pixels*/
                       double base, /* base line distance*/
                       double c1u, /* principal point x */
                       double c1v  /* principal point y */)
 {
-    Mat X(3,x.cols,DataType<float>::type);
-    assert(x.type() == DataType<float>::type);
+    Mat X(3,x.cols,DataType<T>::type);
+    assert(x.type() == DataType<T>::type);
     for(int i=0; i<x.cols; ++i)
     {
-        float d = max(x.at<float>(0,i)-x.at<float>(2,i), 1e-4f);
-        X.at<float>(0,i) = base*(x.at<float>(0,i)-c1u)/d;
-        X.at<float>(1,i) = base*(x.at<float>(1,i)-c1v)/d;
-        X.at<float>(2,i) = f*base/d;
+        T d = x.at<T>(0,i)-x.at<T>(2,i);
+        X.at<T>(0,i) = base*(x.at<T>(0,i)-c1u)/d;
+        X.at<T>(1,i) = base*(x.at<T>(1,i)-c1v)/d;
+        X.at<T>(2,i) = f*base/d;
     }
     return X;
 }
+
+template<typename T> Mat
+triangulate_rectified(const Mat& x,
+                      const struct param& param)
+{
+    return triangulate_rectified<T>(x,param.calib.f,param.base,param.calib.cu,
+                                    param.calib.cv);
+}
+
+
 // stereo odometry
 
-vector<Affine3f>
-sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
-                 const boost::filesystem::path& dbg_dir)
+vector<Mat>
+sequence_odometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
+                  const boost::filesystem::path& dbg_dir)
 {
+    string file_name;
     int MAX_FEATURE_NUM = 1200;
     HarrisBinnedFeatureDetector detector(5, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(5);
@@ -1072,7 +1178,17 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
     {
         F /= F.at<double>(2,2);
     }
-    BOOST_LOG_TRIVIAL(info) << (boost::format("P1=%s, P2=%s, F=%s") % _str<double>(P1) % _str<double>(P2) % _str<double>(F)).str();
+
+    /* param structure */
+    struct param param;
+    param.base = abs(P2.at<double>(0,3)/P2.at<double>(0,0));
+    param.calib.f = P1.at<double>(0,0);
+    param.calib.cu = P1.at<double>(0,2);
+    param.calib.cv = P1.at<double>(1,2);
+
+    vector<Mat> poses; /* accumulated poses */
+    poses.push_back(Mat::eye(4,4,DataType<double>::type));
+
     // reconstructed 3d clouds
     Mat X, X_prev;
     // current and previous pair of images
@@ -1083,8 +1199,6 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
     KeyPoints kp1, kp2, kp1_prev, kp2_prev;
     // current and previous matches (for the stereo pair images)
     Matches match_lr, match_lr_prev;
-    // result
-    vector<Affine3f> poses;
     bool first = true;
     const clock_t begin_time = clock();
     int iter_num;
@@ -1093,12 +1207,17 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
         BOOST_LOG_TRIVIAL(info) << "iter: " << iter_num;
         if (!first) 
         {
-            im1.copyTo(im1_prev); im2.copyTo(im2_prev);
-            d1.copyTo(d1_prev); d2.copyTo(d2_prev);
-            kp1_prev = kp1; kp2_prev = kp2;
+            /* save previous state */
+            im1.copyTo(im1_prev);
+            im2.copyTo(im2_prev);
+            d1.copyTo(d1_prev);
+            d2.copyTo(d2_prev);
+            kp1_prev = kp1;
+            kp2_prev = kp2;
             match_lr_prev = match_lr;
             X.copyTo(X_prev);
-            kp1.clear(); kp2.clear();
+            kp1.clear();
+            kp2.clear();
             match_lr.clear();
         }
         im1 = (*stereo_pair).first;
@@ -1110,40 +1229,52 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
 	BOOST_LOG_TRIVIAL(info) << "using " << kp2.size() << " keypoints in the 2nd image";
         extractor.compute(im1, kp1, d1);
 	extractor.compute(im2, kp2, d2);
-        save1(im1, kp1, (boost::format((dbg_dir/"harris_left_%03d.jpg").string()) % iter_num).str().c_str(), INT_MAX);
-        save1(im2, kp2, (boost::format((dbg_dir/"harris_right_%03d.jpg").string()) % iter_num).str().c_str(), INT_MAX);
-        match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
-        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs right: %d matches", match_lr.size());
-        save2blend(im1, im2, kp1, kp2, match_lr, (boost::format((dbg_dir/"lr_blend_%03d.jpg").string()) % iter_num).str().c_str());
+        if (param.save_debug)
+        {
+            file_name = (boost::format((dbg_dir/"corners1_%03d.jpg").string()) % iter_num).str();
+            save1(im1,kp1,file_name,INT_MAX);
+            file_name = (boost::format((dbg_dir/"corners2_%03d.jpg").string()) % iter_num).str();
+            save1(im2,kp2,file_name,INT_MAX);
+        }
 
-	cv::Mat
-            x1(2, match_lr.size(), DataType<float>::type),
-            x2(2, match_lr.size(), DataType<float>::type);
-        collect_matches(kp1,kp2,match_lr,x1,x2);
-        // each col is a 3d pt
-        //X = triangulate_dlt(x1, x2, P1, P2);
-        double f = P1.at<double>(0,0), base = abs(P2.at<double>(0,3)),
-            c1u = P1.at<double>(0,2), c1v = P1.at<double>(1,2);
-        X = triangulate_rectified(x1, x2, f, base, c1u, c1v);
-        assert(X.type()==DataType<float>::type);
-//        save1reproj(im1,X,x1,P1,(boost::format((dbg_dir/"tri_l%03d.jpg").string()) % iter_num).str().c_str());
-//        save1reproj(im1,X,x2,P2,(boost::format((dbg_dir/"tri_r%03d.jpg").string()) % iter_num).str().c_str());
+        match_desc(kp1, kp2, d1, d2, match_lr, MatchParams(F));
+        BOOST_LOG_TRIVIAL(debug) << "Done matching left vs right: " << match_lr.size() << " matches";
+        save2blend(im1,im2,kp1,kp2,match_lr,
+                   (boost::format((dbg_dir/"blend12_%03d.jpg").string()) % iter_num).str().c_str());
+
+	Mat x;
+        collect_matches(kp1,kp2,match_lr,x);
+        X = triangulate_rectified<double>(x,param);
+        if (param.save_debug)
+        {
+            file_name = (boost::format((dbg_dir/"reproj1_%03d.jpg").string()) % iter_num).str();
+            save1reproj(im1,X,x,P1,file_name);
+            file_name = (boost::format((dbg_dir/"reproj2_%03d.jpg").string()) % iter_num).str();
+            save1reproj(im1,X,Mat(2,x.cols,DataType<double>::type,x.ptr<double>(2)),P2,file_name);
+        }
+
         if (first)
         {
             first = false;
             continue;
         }
-
+        
+        /* match left vs. left previous */
         Matches match11;
-        match_desc(kp1, kp1_prev, d1, d1_prev, match11);
-        save2blend(im1, im1_prev, kp1, kp1_prev, match11,
-                   (boost::format((dbg_dir/"ll%d.jpg").string())%iter_num).str().c_str(), INT_MAX);
-        BOOST_LOG_TRIVIAL(info) << cv::format("Done matching left vs left_prev: %d matches", match11.size());
+        match_desc(kp1,kp1_prev,d1,d1_prev,match11);
+        if (param.save_debug)
+        {
+            string file_name = (boost::format((dbg_dir/"match11_%d.jpg").string())%iter_num).str();
+            save2blend(im1,im1_prev,kp1,kp1_prev,match11,file_name,INT_MAX);
+        }
+        BOOST_LOG_TRIVIAL(debug) << "Done matching left vs left_prev: " <<
+            match11.size() << " matches";
 
+        /* match right vs. right prev */
         Matches match22;
-        match_desc(kp2, kp2_prev, d2, d2_prev, match22);
-        save2blend(im2, im2_prev, kp2, kp2_prev, match22,
-                   (boost::format((dbg_dir/"rr%d.jpg").string())%iter_num).str().c_str(), INT_MAX);
+        match_desc(kp2,kp2_prev,d2,d2_prev,match22);
+        file_name = (boost::format((dbg_dir/"rr%d.jpg").string())%iter_num).str();
+        save2blend(im2,im2_prev,kp2,kp2_prev,match22,file_name,INT_MAX);
         BOOST_LOG_TRIVIAL(info) << cv::format("Done matching right vs right_prev: %d matches", match22.size());
 
         Matches match_pcl; 
@@ -1151,24 +1282,48 @@ sequenceOdometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
         match_circle(match_lr, match_lr_prev, match11, match22, circ_match, match_pcl);
         if (circ_match.size() < 3)
         {
-            BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " << circ_match.size();
-            poses.push_back(Affine3f::Identity());
+            BOOST_LOG_TRIVIAL(info) << "not enough matches in current circle: " 
+                                    << circ_match.size();
             continue;
-        } 
-        BOOST_LOG_TRIVIAL(info) << circ_match.size() << " points in circular match";
-        MatrixXf Xe(3, match_pcl.size()), Xe_prev(3, match_pcl.size());
-        mat2eig(X, X_prev, Xe, Xe_prev, match_pcl);
+        }
+        BOOST_LOG_TRIVIAL(info) << match_pcl.size() << " points in circular match";
+
+        /* collect the points that participate in circular match */
+        Mat Xp_c(3,circ_match.size(),DataType<double>::type),
+            x_c(4,circ_match.size(),DataType<double>::type);
+        for(int i=0;i<match_pcl.size();++i)
+        {
+            /* observed points in both images */
+            x_c.at<double>(0,i) = x.at<double>(0,match_pcl[i][0]);
+            x_c.at<double>(1,i) = x.at<double>(1,match_pcl[i][0]);
+            x_c.at<double>(2,i) = x.at<double>(2,match_pcl[i][0]);
+            x_c.at<double>(3,i) = x.at<double>(3,match_pcl[i][0]);
+            /* previous 3d point */
+            Xp_c.at<double>(0,i) = X_prev.at<double>(0,match_pcl[i][1]);
+            Xp_c.at<double>(1,i) = X_prev.at<double>(1,match_pcl[i][1]);
+            Xp_c.at<double>(2,i) = X_prev.at<double>(2,match_pcl[i][1]);
+        }
+        save2blend(im1,im2,x,
+                   (boost::format((dbg_dir/"circle12_%03d.jpg").string()) % iter_num).str().c_str());
+
         save4(im1, im1_prev, im2, im2_prev, kp1, kp1_prev, kp2, kp2_prev, circ_match,
               (boost::format((dbg_dir/"circ_match_%03d.jpg").string()) % iter_num).str().c_str());
-        BOOST_LOG_TRIVIAL(info) << "solving rigid motion";
-        Affine3f T;
-        MatrixXf P1e, P2e; cv2eigen(P1,P1e); cv2eigen(P2,P2e);
         vector<int> inliers;
-        ransacRigidMotion(P1e, P2e, Xe, Xe_prev, T, inliers);
-        poses.push_back(T);
-        MatrixXf Xe_prev_rot = h2e(T.matrix()*e2h(Xe_prev));
-        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
-                    (boost::format((dbg_dir/"reproj_%03d.jpg").string()) % iter_num).str().c_str());
+        vector<double> tr(6,0);
+        if (ransac_minimize_reproj(Xp_c,x_c,tr,inliers,param))
+        {
+            Mat tr_mat(4,4,DataType<double>::type);
+            tr2mat(tr,tr_mat);
+            Mat pose = poses.back();
+            cout << "pose before update: " << pose << endl;
+            pose = pose*tr_mat.inv();
+            cout << "pose after update: " << pose << endl;
+            poses.push_back(pose.clone());
+        } else {
+            BOOST_LOG_TRIVIAL(error) << "failed to solve rigid motion";
+        }
+//        save2reproj(im1, get_inl(Xe,inliers), get_inl(Xe_prev_rot,inliers), P1e,
+//                    (boost::format((dbg_dir/"reproj_%03d.jpg").string()) % iter_num).str().c_str());
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
     return poses;
@@ -1242,97 +1397,227 @@ calibratedSFM(const Mat& K, MonoImageGenerator& images)
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
 }
 
+
 void
-computeResidualsAndJacobian(const Mat& X, vector<double> &tr,vector<int> &active) {
-
-  // extract motion parameters
-  double rx = tr[0]; double ry = tr[1]; double rz = tr[2];
-  double tx = tr[3]; double ty = tr[4]; double tz = tr[5];
-
-  // precompute sine/cosine
-  double sx = sin(rx); double cx = cos(rx); double sy = sin(ry);
-  double cy = cos(ry); double sz = sin(rz); double cz = cos(rz);
-
-  // compute rotation matrix and derivatives
-  double r00    = +cy*cz;          double r01    = -cy*sz;          double r02    = +sy;
-  double r10    = +sx*sy*cz+cx*sz; double r11    = -sx*sy*sz+cx*cz; double r12    = -sx*cy;
-  double r20    = -cx*sy*cz+sx*sz; double r21    = +cx*sy*sz+sx*cz; double r22    = +cx*cy;
-  double rdrx10 = +cx*sy*cz-sx*sz; double rdrx11 = -cx*sy*sz-sx*cz; double rdrx12 = -cx*cy;
-  double rdrx20 = +sx*sy*cz+cx*sz; double rdrx21 = -sx*sy*sz+cx*cz; double rdrx22 = -sx*cy;
-  double rdry00 = -sy*cz;          double rdry01 = +sy*sz;          double rdry02 = +cy;
-  double rdry10 = +sx*cy*cz;       double rdry11 = -sx*cy*sz;       double rdry12 = +sx*sy;
-  double rdry20 = -cx*cy*cz;       double rdry21 = +cx*cy*sz;       double rdry22 = -cx*sy;
-  double rdrz00 = -cy*sz;          double rdrz01 = -cy*cz;
-  double rdrz10 = -sx*sy*sz+cx*cz; double rdrz11 = -sx*sy*cz-cx*sz;
-  double rdrz20 = +cx*sy*sz+sx*cz; double rdrz21 = +cx*sy*cz-sx*sz;
-
-  // loop variables
-  double X1p,Y1p,Z1p;
-  double X1c,Y1c,Z1c,X2c;
-  double X1cd,Y1cd,Z1cd;
-
-  // for all observations do
-  for (int32_t i=0; i<(int32_t)active.size(); i++)
-  {
-
-      // get 3d point in previous coordinate system
-      X1p = X.at<float>(0,active[i]);
-      Y1p = X.at<float>(1,active[i]);
-      Z1p = X.at<float>(2,active[i]);
-
-      // compute 3d point in current left coordinate system
-      X1c = r00*X1p+r01*Y1p+r02*Z1p+tx;
-      Y1c = r10*X1p+r11*Y1p+r12*Z1p+ty;
-      Z1c = r20*X1p+r21*Y1p+r22*Z1p+tz;
+compute_J(const Mat& X, const Mat& observe, vector<double> &tr, const struct param &param,
+          const vector<int> &active, Mat& J, Mat& predict, Mat& residual)
+{
+    // extract motion parameters
+    double rx = tr[0]; double ry = tr[1]; double rz = tr[2];
+    double tx = tr[3]; double ty = tr[4]; double tz = tr[5];
     
-      // weighting
-      double weight = 1.0;
-//      if (param.reweighting)
-//          weight = 1.0/(fabs(p_observe[4*i+0]-param.calib.cu)/fabs(param.calib.cu) + 0.05);
+    // precompute sine/cosine
+    double sx = sin(rx); double cx = cos(rx); double sy = sin(ry);
+    double cy = cos(ry); double sz = sin(rz); double cz = cos(rz);
     
-      // compute 3d point in current right coordinate system
-      X2c = X1c-param.base;
+    // compute rotation matrix and derivatives
+    double r00    = +cy*cz;          double r01    = -cy*sz;          double r02    = +sy;
+    double r10    = +sx*sy*cz+cx*sz; double r11    = -sx*sy*sz+cx*cz; double r12    = -sx*cy;
+    double r20    = -cx*sy*cz+sx*sz; double r21    = +cx*sy*sz+sx*cz; double r22    = +cx*cy;
+    double rdrx10 = +cx*sy*cz-sx*sz; double rdrx11 = -cx*sy*sz-sx*cz; double rdrx12 = -cx*cy;
+    double rdrx20 = +sx*sy*cz+cx*sz; double rdrx21 = -sx*sy*sz+cx*cz; double rdrx22 = -sx*cy;
+    double rdry00 = -sy*cz;          double rdry01 = +sy*sz;          double rdry02 = +cy;
+    double rdry10 = +sx*cy*cz;       double rdry11 = -sx*cy*sz;       double rdry12 = +sx*sy;
+    double rdry20 = -cx*cy*cz;       double rdry21 = +cx*cy*sz;       double rdry22 = -cx*sy;
+    double rdrz00 = -cy*sz;          double rdrz01 = -cy*cz;
+    double rdrz10 = -sx*sy*sz+cx*cz; double rdrz11 = -sx*sy*cz-cx*sz;
+    double rdrz20 = +cx*sy*sz+sx*cz; double rdrz21 = +cx*sy*cz-sx*sz;
+    
+    // loop variables
+    double X1p,Y1p,Z1p;
+    double X1c,Y1c,Z1c,X2c;
+    double X1cd,Y1cd,Z1cd;
+    //    printf("sample: %d,%d,%d\n",active[0],active[1],active[2]);
+    // for all observations do
+    for (int i=0; i<active.size(); i++)
+    {
+        // get 3d point in previous coordinate system
+        X1p = X.at<double>(0,active[i]);
+        Y1p = X.at<double>(1,active[i]);
+        Z1p = X.at<double>(2,active[i]);
+//        cout << "X1p=" << X1p << ",Y1p=" << Y1p << ",Z1p=" << Z1p << endl;
 
-      // for all paramters do
-      for (int32_t j=0; j<6; j++) {
-          
-          // derivatives of 3d pt. in curr. left coordinates wrt. param j
-          switch (j) {
-          case 0: X1cd = 0;
-              Y1cd = rdrx10*X1p+rdrx11*Y1p+rdrx12*Z1p;
-              Z1cd = rdrx20*X1p+rdrx21*Y1p+rdrx22*Z1p;
-              break;
-          case 1: X1cd = rdry00*X1p+rdry01*Y1p+rdry02*Z1p;
-              Y1cd = rdry10*X1p+rdry11*Y1p+rdry12*Z1p;
-              Z1cd = rdry20*X1p+rdry21*Y1p+rdry22*Z1p;
-              break;
-          case 2: X1cd = rdrz00*X1p+rdrz01*Y1p;
-              Y1cd = rdrz10*X1p+rdrz11*Y1p;
-              Z1cd = rdrz20*X1p+rdrz21*Y1p;
-              break;
-          case 3: X1cd = 1; Y1cd = 0; Z1cd = 0; break;
-          case 4: X1cd = 0; Y1cd = 1; Z1cd = 0; break;
-          case 5: X1cd = 0; Y1cd = 0; Z1cd = 1; break;
-          }
-
-      // set jacobian entries (project via K)
-      J[(4*i+0)*6+j] = weight*param.calib.f*(X1cd*Z1c-X1c*Z1cd)/(Z1c*Z1c); // left u'
-      J[(4*i+1)*6+j] = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // left v'
-      J[(4*i+2)*6+j] = weight*param.calib.f*(X1cd*Z1c-X2c*Z1cd)/(Z1c*Z1c); // right u'
-      J[(4*i+3)*6+j] = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // right v'
+        // compute 3d point in current left coordinate system
+        X1c = r00*X1p+r01*Y1p+r02*Z1p+tx;
+        Y1c = r10*X1p+r11*Y1p+r12*Z1p+ty;
+        Z1c = r20*X1p+r21*Y1p+r22*Z1p+tz;
+//        cout << "X1c=" << X1c << ",Y1p=" << Y1c << ",Z1c=" << Z1c << endl;
+        
+        // weighting
+        double weight = 1.0;
+        if (true)
+            weight = 1.0/(fabs(observe.at<double>(0,i)-param.calib.cu)/fabs(param.calib.cu) + 0.05);
+        
+        // compute 3d point in current right coordinate system
+        X2c = X1c-param.base;
+//        cout << "X2c:" << X2c << endl;
+        // for all paramters do
+        for (int j=0; j<6; j++)
+        {
+            // derivatives of 3d pt. in curr. left coordinates wrt. param j
+            switch (j)
+            {
+            case 0: X1cd = 0;
+                Y1cd = rdrx10*X1p+rdrx11*Y1p+rdrx12*Z1p;
+                Z1cd = rdrx20*X1p+rdrx21*Y1p+rdrx22*Z1p;
+                break;
+            case 1: X1cd = rdry00*X1p+rdry01*Y1p+rdry02*Z1p;
+                Y1cd = rdry10*X1p+rdry11*Y1p+rdry12*Z1p;
+                Z1cd = rdry20*X1p+rdry21*Y1p+rdry22*Z1p;
+                break;
+            case 2: X1cd = rdrz00*X1p+rdrz01*Y1p;
+                Y1cd = rdrz10*X1p+rdrz11*Y1p;
+                Z1cd = rdrz20*X1p+rdrz21*Y1p;
+                break;
+            case 3: X1cd = 1; Y1cd = 0; Z1cd = 0; break;
+            case 4: X1cd = 0; Y1cd = 1; Z1cd = 0; break;
+            case 5: X1cd = 0; Y1cd = 0; Z1cd = 1; break;
+            }
+            
+            // set jacobian entries (project via K)
+            J.at<double>(4*i+0,j) = weight*param.calib.f*(X1cd*Z1c-X1c*Z1cd)/(Z1c*Z1c); // left u'
+            J.at<double>(4*i+1,j) = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // left v'
+            J.at<double>(4*i+2,j) = weight*param.calib.f*(X1cd*Z1c-X2c*Z1cd)/(Z1c*Z1c); // right u'
+            J.at<double>(4*i+3,j) = weight*param.calib.f*(Y1cd*Z1c-Y1c*Z1cd)/(Z1c*Z1c); // right v'
+//            printf("observation %d, param %d: %g,%g,%g,%g\n",i,j,J.at<double>(4*i+0,j),J.at<double>(4*i+1,j),J.at<double>(4*i+2,j),J.at<double>(4*i+3,j));
+        }
+        
+        // set prediction (project via K)
+        predict.at<double>(0,i) = param.calib.f*X1c/Z1c+param.calib.cu; // left u
+        predict.at<double>(1,i) = param.calib.f*Y1c/Z1c+param.calib.cv; // left v
+        predict.at<double>(2,i) = param.calib.f*X2c/Z1c+param.calib.cu; // right u
+        predict.at<double>(3,i) = param.calib.f*Y1c/Z1c+param.calib.cv; // right v
+    
+        // set residuals
+        residual.at<double>(4*i+0,0) = weight*(observe.at<double>(0,active[i])-predict.at<double>(0,i));
+        residual.at<double>(4*i+1,0) = weight*(observe.at<double>(1,active[i])-predict.at<double>(1,i));
+        residual.at<double>(4*i+2,0) = weight*(observe.at<double>(2,active[i])-predict.at<double>(2,i));
+        residual.at<double>(4*i+3,0) = weight*(observe.at<double>(3,active[i])-predict.at<double>(3,i));
     }
-
-    // set prediction (project via K)
-    p_predict[4*i+0] = param.calib.f*X1c/Z1c+param.calib.cu; // left u
-    p_predict[4*i+1] = param.calib.f*Y1c/Z1c+param.calib.cv; // left v
-    p_predict[4*i+2] = param.calib.f*X2c/Z1c+param.calib.cu; // right u
-    p_predict[4*i+3] = param.calib.f*Y1c/Z1c+param.calib.cv; // right v
-    
-    // set residuals
-    p_residual[4*i+0] = weight*(p_observe[4*i+0]-p_predict[4*i+0]);
-    p_residual[4*i+1] = weight*(p_observe[4*i+1]-p_predict[4*i+1]);
-    p_residual[4*i+2] = weight*(p_observe[4*i+2]-p_predict[4*i+2]);
-    p_residual[4*i+3] = weight*(p_observe[4*i+3]-p_predict[4*i+3]);
-  }
 }
 
+template<typename T>
+ostream& operator<< (ostream& out, const vector<T> v) {
+    int last = v.size() - 1;
+    out << "[";
+    for(int i = 0; i < last; i++)
+        out << v[i] << ", ";
+    out << v[last] << "]";
+    return out;
+}
+/* calculate the support set for current ransac model */
+std::pair<vector<int>,double>
+get_inliers(const Mat& X, const Mat& observe, vector<double> &tr, const struct param& param)
+{
+    vector<int> active;
+    for (int i=0; i<X.cols; ++i)
+        active.push_back(i);
+
+    int num_pts = active.size();
+    Mat J(4*num_pts,6,DataType<double>::type), /* all of these will not be used */
+        residual(4*num_pts,1,DataType<double>::type),
+        predict(4,num_pts,DataType<double>::type);
+    compute_J(X,observe,tr,param,active,J,predict,residual);
+
+    /* compute the inliers */
+    vector<int> inliers;
+    double err2 = 0;
+    for (int i=0; i<X.cols; ++i)
+    {
+        err2 = 
+            pow(observe.at<double>(0,i)-predict.at<double>(0,i),2) +
+            pow(observe.at<double>(1,i)-predict.at<double>(1,i),2) +
+            pow(observe.at<double>(2,i)-predict.at<double>(2,i),2) +
+            pow(observe.at<double>(3,i)-predict.at<double>(3,i),2);
+        if (err2 < param.inlier_threshold*param.inlier_threshold)
+            inliers.push_back(i);
+    }
+    double rms = sqrt(err2/X.cols);
+    return std::make_pair(inliers,rms);
+}
+
+/* ransac wrapper for model estimation.
+   this is a standard  way to handle data contaminated by outliers
+   TODO: better estimate the number of ransac iterations
+*/
+bool
+ransac_minimize_reproj(const Mat& X, /* 3d points */
+                       const Mat& observe, /* observed pixels */
+                       vector<double>& best_tr, /*output: best found tr vector */
+                       vector<int>& best_inliers, /*output: largest support set, indexes into X */
+                       const struct param& param)
+{
+    int model_size = 3; /* sample size for ransac model estimation */
+    vector<int> sample(model_size,0) /*current sample*/;
+    vector<double> tr(6,0); /* current tr vector */
+    
+    best_inliers.clear();
+    for(int i=0; i<param.ransac_iter; ++i) /* ransac loop*/
+    {
+        std::fill(tr.begin(),tr.end(),0); /* start search from 0 */
+        randomsample(3,X.cols,sample); /* select sample */
+        if (minimize_reproj(X,observe,tr,param,sample) == false) /* estimate model */
+        {
+            continue;
+        } else {
+            std::pair<vector<int>,double> p = get_inliers(X,observe,tr,param); /* get the support set for this model */
+            if (p.first.size()>best_inliers.size()) /* save it as best */
+            {
+                best_inliers = p.first;
+                best_tr = tr;
+            }
+        }
+    }
+    if (best_inliers.size()<6 ||
+        minimize_reproj(X,observe,best_tr,param,best_inliers) == false)
+        return false;
+
+    std::pair<vector<int>,double> p = get_inliers(X,observe,best_tr,param);
+    best_inliers = p.first;
+    BOOST_LOG_TRIVIAL(debug) << "support set size:" << best_inliers.size()
+                             << ", reprojection error RMS: " << p.second;
+    return true;
+}
+
+/* gauss newton minimization of the reprojection error */
+bool
+minimize_reproj(const Mat& X, const Mat& observe, vector<double>& tr,
+                const struct param& param, const vector<int>& active)
+{
+    int num_pts = active.size();
+    Mat A(6,6,DataType<double>::type), B(6,1,DataType<double>::type),
+        J(4*num_pts,6,DataType<double>::type),
+        residual(4*num_pts,1,DataType<double>::type),
+        predict(4,num_pts,DataType<double>::type);
+    double step_size = 1.0f;
+    for(int i=0; i<100; ++i)
+    {
+        compute_J(X,observe,tr,param,active,J,predict,residual);
+        Mat JtJ(6,6,DataType<double>::type), p_gn(6,1,DataType<double>::type); 
+
+        //cout << "J:" << endl << J << endl;
+        mulTransposed(J,JtJ,true);
+        //cout << "JtJ:" << endl << JtJ << endl;
+        //cout << "Jt*residual:" << endl << J.t()*residual << endl;
+        if (solve(JtJ,J.t()*residual,p_gn,cv::DECOMP_LU) == false)
+        {
+            //BOOST_LOG_TRIVIAL(warning) << "iteration " << i << ": matrix is close to being singular";
+            return false;
+        }
+        bool converged = true;
+        for(int j=0;j<6;++j)
+        {
+            if (fabs(p_gn.at<double>(j,0) > param.thresh))
+            {
+                converged = false;
+                break;
+            }
+        }
+        if (converged)
+            return converged;
+        //cout << "tr cur=" << tr << endl;
+        for (int j=0;j<6;++j)
+            tr[j] = tr[j] + step_size*p_gn.at<double>(j,0);
+    }
+    return false;
+}
