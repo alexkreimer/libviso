@@ -911,117 +911,119 @@ showHarris(const Mat& harris_response, int thresh)
 class HarrisBinnedFeatureDetector : public cv::FeatureDetector
 {
 public:
-    // descriptor radius is used only to init KeyPoints
-    HarrisBinnedFeatureDetector(int radius, int n, int nbinx=24, int nbiny=5,
-                                float k = .04, int block_size=3, int aperture_size=5)
-        : m_radius(radius), m_nbinx(nbinx), m_nbiny(nbiny), 
-          m_block_size(block_size), m_aperture_size(aperture_size), m_n(n)
-        {
-            assert(nbinx>0 && nbiny>0);
-        }
-
+  // descriptor radius is used only to init KeyPoints
+  HarrisBinnedFeatureDetector(int radius, int n, int nbinx=24, int nbiny=5,
+			      float k = .04, int block_size=3, int aperture_size=5)
+    : m_radius(radius), m_nbinx(nbinx), m_nbiny(nbiny), 
+      m_block_size(block_size), m_aperture_size(aperture_size), m_n(n)
+  {
+    assert(nbinx>0 && nbiny>0);
+  }
+  
 protected:
-
-    void
-    detectImpl(cv::InputArray image, KeyPoints& kp, cv::InputArray mask=Mat()) const
+  
+  void
+  detectImpl(const Mat& image, KeyPoints& kp, const Mat& mask=Mat()) const
+  {
+    Mat harris_response;
+    // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
+    cv::cornerHarris(image, harris_response, m_block_size, m_aperture_size,
+		     m_k, cv::BORDER_DEFAULT);
+    assert(harris_response.type() == DataType<float>::type);
+    int stridex = (int)image.cols/m_nbinx,
+      stridey = (int)image.rows/m_nbiny;
+    assert(stridex>0 && stridey>0);
+    struct elem
     {
-        Mat harris_response;
-        // M_c = det(A) - k*trace^2(A), the range for k \in [0.04, 0.15]
-        cv::cornerHarris(image, harris_response, m_block_size, m_aperture_size,
-                         m_k, cv::BORDER_DEFAULT);
-        assert(harris_response.type() == DataType<float>::type);
-        int stridex = (int)image.getMat().cols/m_nbinx,
-            stridey = (int)image.getMat().rows/m_nbiny;
-        assert(stridex>0 && stridey>0);
-        struct elem
-        {
-            int x, y;
-            float val;
-            elem(int x, int y, float val) : x(x), y(y), val(val) {}
-            elem() : x(-1), y(-1), val(NAN) {}
-            bool operator<(const elem& other) const{ return val<other.val; }
-        };
-        int corners_per_block = (int)m_n/(m_nbinx*m_nbiny);
-        vector<elem> v;
-        v.reserve(stridex*stridey);
-        for(int binx=0; binx<m_nbinx; ++binx)
-        {
-            for(int biny=0; biny<m_nbiny; ++biny)
-            {
-                for(int x=binx*stridex; x<(binx+1)*stridex && x<harris_response.cols; ++x)
-                {
-                    for(int y=biny*stridey; y<(biny+1)*stridey && y<harris_response.rows; ++y)
-                    {
-                        float response = abs(harris_response.at<float>(y,x));
-                        if (isEqual(response,.0f))
-                            continue;
-                        v.push_back(elem(x,y,response));
-                    }
-                }
-                int m = (v.size()>corners_per_block) ? v.size()-corners_per_block : 0;
-                if (m>0)
-                    std::nth_element(v.begin(), v.begin()+m, v.end());
-                for(vector<elem>::iterator iter=v.begin()+m; iter<v.end(); ++iter)
-                {
-                    KeyPoint keypoint;
-                    keypoint.pt = Point2f(iter->x, iter->y);
-                    keypoint.response = iter->val;
-                    keypoint.size = 2*m_radius+1;
-                    kp.push_back(keypoint);
-                }
-                v.clear();
-            }
-        }
-        BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners";
+      int x, y;
+      float val;
+      elem(int x, int y, float val) : x(x), y(y), val(val) {}
+      elem() : x(-1), y(-1), val(NAN) {}
+      bool operator<(const elem& other) const{ return val<other.val; }
+    };
+    int corners_per_block = (int)m_n/(m_nbinx*m_nbiny);
+    vector<elem> v;
+    v.reserve(stridex*stridey);
+    for(int binx=0; binx<m_nbinx; ++binx)
+    {
+      for(int biny=0; biny<m_nbiny; ++biny)
+      {
+	for(int x=binx*stridex; x<(binx+1)*stridex && x<harris_response.cols; ++x)
+	{
+	  for(int y=biny*stridey; y<(biny+1)*stridey && y<harris_response.rows; ++y)
+	  {
+	    float response = abs(harris_response.at<float>(y,x));
+	    if (isEqual(response,.0f))
+	      continue;
+	    v.push_back(elem(x,y,response));
+	  }
+	}
+	int m = (v.size()>corners_per_block) ? v.size()-corners_per_block : 0;
+	if (m>0)
+	  std::nth_element(v.begin(), v.begin()+m, v.end());
+	for(vector<elem>::iterator iter=v.begin()+m; iter<v.end(); ++iter)
+	{
+	  KeyPoint keypoint;
+	  keypoint.pt = Point2f(iter->x, iter->y);
+	  keypoint.response = iter->val;
+	  keypoint.size = 2*m_radius+1;
+	  kp.push_back(keypoint);
+	}
+	v.clear();
+      }
     }
-    int m_radius, m_nbinx, m_nbiny, m_block_size, m_aperture_size,m_n;
-    float m_k;
+    BOOST_LOG_TRIVIAL(info) << "found " << kp.size() << " harris corners";
+  }
+  int m_radius, m_nbinx, m_nbiny, m_block_size, m_aperture_size,m_n;
+  float m_k;
 };
 
 class MyFeatureExtractor : public cv::DescriptorExtractor
 {
 public:
-    MyFeatureExtractor(int descriptor_radius) 
-        : m_descriptor_radius(descriptor_radius) {}
+  MyFeatureExtractor(int descriptor_radius) 
+    : m_descriptor_radius(descriptor_radius) {}
 protected:
-    int m_descriptor_radius;
-
-    int defaultNorm() const
+  int m_descriptor_radius;
+  
+  int defaultNorm() const
+  {
+    return cv::NORM_L1;
+  }
+  int descriptorType() const
+  {
+    return DataType<float>::type;
+  }
+  
+  int 
+  descriptorSize() const
+  {
+    return (2*m_descriptor_radius+1)*(2*m_descriptor_radius+1);
+  }
+  
+  void computeImpl(const Mat& image, std::vector<KeyPoint>& kp, Mat& d) const
+  {
+    Size sz = image.size();
+    int rows = sz.width, cols = sz.height;
+    Mat sob(rows, cols, DataType<float>::type, Scalar(0));
+    
+    Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0)).copyTo(d);
+    assert(d.data);
+    Sobel(image, sob, sob.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
+    for(int k=0; k<kp.size(); ++k)
     {
-        return cv::NORM_L1;
+	Point2i p = kp.at(k).pt;
+	for(int i=-m_descriptor_radius,col=0; i<=m_descriptor_radius; i+=1)
+	{
+	    for(int j=-m_descriptor_radius; j<=m_descriptor_radius; j+=1,++col)
+	    {
+	      float val = (p.y+i>0 && p.y+i<rows && p.x+j>0 && p.x+j<cols) ?
+		sob.at<float>(p.y+i, p.x+j) : 0;
+	      d.at<float>(k,col) = val;
+	    }
+	}
     }
-    int descriptorType() const
-    {
-        return DataType<float>::type;
-    }
-
-    int 
-    descriptorSize() const
-    {
-        return (2*m_descriptor_radius+1)*(2*m_descriptor_radius+1);
-    }
-
-    void computeImpl(InputArray image, std::vector<KeyPoint>& kp, OutputArray d) const
-    {
-        Mat sob(image.rows(), image.cols(), DataType<float>::type, Scalar(0));
-
-        Mat(kp.size(), descriptorSize(), DataType<float>::type, Scalar(0)).copyTo(d);
-        assert(d.getMat().data);
-        Sobel(image, sob, sob.type(), 1, 0, 3, 1, 0, cv::BORDER_REFLECT_101);
-        for(int k=0; k<kp.size(); ++k)
-        {
-            Point2i p = kp.at(k).pt;
-            for(int i=-m_descriptor_radius,col=0; i<=m_descriptor_radius; i+=1)
-            {
-                for(int j=-m_descriptor_radius; j<=m_descriptor_radius; j+=1,++col)
-                {
-                    float val = (p.y+i>0 && p.y+i<image.rows() && p.x+j>0 && p.x+j<image.cols()) ?
-                        sob.at<float>(p.y+i, p.x+j) : 0;
-                    d.getMat().at<float>(k,col) = val;
-                }
-            }
-        }
-    }
+  }
 };
 
 typedef Mat Descriptor;
@@ -1332,6 +1334,7 @@ sequence_odometry(const Mat& P1, const Mat& P2, StereoImageGenerator& images,
 void
 calibratedSFM(const Mat& K, MonoImageGenerator& images)
 {
+#if 0
     int MAX_FEATURE_NUM = 1500;
     HarrisBinnedFeatureDetector detector(9, MAX_FEATURE_NUM);
     MyFeatureExtractor extractor(9);
@@ -1395,6 +1398,7 @@ calibratedSFM(const Mat& K, MonoImageGenerator& images)
         P2.at<float>(0,0) = P2.at<float>(1,1) = P2.at<float>(2,2) = 1.0;
     }
     BOOST_LOG_TRIVIAL(info) << "avg time per iteration [s]:" << float(clock()-begin_time)/CLOCKS_PER_SEC/iter_num << endl;
+#endif
 }
 
 

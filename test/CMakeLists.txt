@@ -1,6 +1,6 @@
-set(OpenCV_DIR "/home/kreimer/opencv3.0/share/OpenCV/")
+set(OpenCV_DIR "/home/kreimer/opencv2.4.9/share/OpenCV/")
 set(CMAKE_CXX_FLAGS "-std=c++0x")
-include_directories("/home/kreimer/tmp/eigen-eigen-6b38706d90a9/")
+include_directories("/home/kreimer/tmp/eigen-eigen-1306d75b4a21/")
 
 add_definitions (-DBOOST_ALL_DYN_LINK)
 set(Boost_USE_STATIC_LIBS        OFF)  # I've already tried ON
