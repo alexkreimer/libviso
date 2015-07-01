@@ -22,6 +22,7 @@
 
 #include <boost/format.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <Eigen/Dense>
 
@@ -57,7 +58,7 @@ typedef pair<Mat,Mat> image_pair;
 
 struct param
 {
-param() : ransac_iter(50), inlier_threshold(2), save_debug(true), thresh(1e-4) {}
+param() : ransac_iter(1000), inlier_threshold(3), save_debug(false), thresh(1e-6) {}
     double base;
     int ransac_iter;
     double inlier_threshold;
@@ -90,11 +91,15 @@ public:
             return result_type();
 	string name0 = str(boost::format(m_mask.first) % m_index),
                name1 = str(boost::format(m_mask.second) % m_index);
+        //	BOOST_LOG_TRIVIAL(debug) << "left image: " << name0;
+	//BOOST_LOG_TRIVIAL(debug) << "right image: " << name1;
+
         image_pair pair = make_pair(cv::imread(name0, CV_LOAD_IMAGE_GRAYSCALE),
                                     cv::imread(name1, CV_LOAD_IMAGE_GRAYSCALE));
         m_index++;
 	return pair.first.data && pair.second.data ? result_type(pair) : result_type();
     }
+    int current() const { return m_index; }
 private:
     int m_index, m_end;
     string_pair m_mask;

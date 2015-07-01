@@ -76,29 +76,36 @@ void init_log()
     logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::debug);
 }
 
+extern int search_radius;
+
 int main(int argc, char** argv)
 {
-    if (argc<3)
+    if (argc<4)
     {
-        cout << "usage: demo result_sha seq_name begin end" << endl;
+        cout << "usage: demo result_sha seq_name search_radius begin end" << endl;
         exit(1);
     }
     int begin = 0, end = INT_MAX;
-    if (argc > 3)
-    {
-        begin = std::stoi(argv[3]);
-    }
+    search_radius = std::stoi(argv[3]);
+    cout << "search_radius:" << search_radius << endl;
     if (argc > 4)
     {
-        end = std::stoi(argv[4]);
+        begin = std::stoi(argv[4]);
     }
-//    init_log();
+    if (argc > 5)
+    {
+        end = std::stoi(argv[5]);
+    }
     char *result_sha = argv[1], *KITTI_HOME  = std::getenv("KITTI_HOME");
     assert(KITTI_HOME);
     fs::path seq_base = fs::path(KITTI_HOME) / "sequences";
     string seq_name(argv[2]);
-    fs::path result_dir = fs::path(KITTI_HOME) / "results" / seq_name / result_sha;
+    fs::path result_dir = fs::path(KITTI_HOME) / ".." / "results" / result_sha / "data";
+    fs::path debug_dir = fs::path(KITTI_HOME) / ".." / "results" / result_sha /"debug";
+
     fs::create_directories(result_dir);
+    fs::create_directories(debug_dir);
+
     BOOST_LOG_TRIVIAL(info) << "Processing sequence: " << seq_name;
     Mat P1(3,4,cv::DataType<double>::type), P2(3,4,cv::DataType<double>::type);
     string calib_file_name = (seq_base/seq_name/"calib.txt").string();
@@ -108,10 +115,8 @@ int main(int argc, char** argv)
     StereoImageGenerator images(StereoImageGenerator::string_pair(
                                     (seq_base / seq_name / "image_0" / "%06d.png").string(),
                                     (seq_base / seq_name / "image_1" / "%06d.png").string()),begin,end);
-    vector<Mat> poses = sequence_odometry(P1, P2, images, result_dir);
-    fs::path poses_dir(result_dir/"data");
-    create_directories(poses_dir);
-    string poses_file_name((poses_dir/(seq_name+".txt")).string());
+    vector<Mat> poses = sequence_odometry(P1, P2, images, debug_dir);
+    string poses_file_name((result_dir/(seq_name+".txt")).string());
     BOOST_LOG_TRIVIAL(info) << "Saving poses to " << poses_file_name;
     savePoses(poses_file_name, poses);
     return 0;

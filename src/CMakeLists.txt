@@ -1,6 +1,6 @@
-set(OpenCV_DIR "/home/kreimer/opencv2.4.9/share/OpenCV/")
+#set(OpenCV_DIR "/home/kreimer/opencv2.4.9/share/OpenCV/")
 set(CMAKE_CXX_FLAGS "-std=c++0x")
-include_directories("/home/kreimer/tmp/eigen-eigen-1306d75b4a21/")
+include_directories("/home/kreimer/tmp/eigen-eigen-10219c95fe65/")
 
 ADD_DEFINITIONS(-DBOOST_ALL_DYN_LINK)
 
@@ -18,3 +18,6 @@ add_library(viso viso.cpp mvg.cpp estimation.cpp misc.cpp)
 
 add_executable(kitti kitti.cpp)
 target_link_libraries(kitti viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
+
+add_executable(isl isl.cpp)
+target_link_libraries(isl viso ${OpenCV_LIBS} ${Boost_LIBRARIES})
